@@ -701,6 +701,24 @@ class AiAgentHaPanel extends LitElement {
         this._showProviderDropdown = false;
       }
     });
+
+    // Reload chat history when tab becomes visible again (e.g. after switching tabs)
+    this._boundVisibilityHandler = () => this._onVisibilityChange();
+    document.addEventListener('visibilitychange', this._boundVisibilityHandler);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._boundVisibilityHandler) {
+      document.removeEventListener('visibilitychange', this._boundVisibilityHandler);
+    }
+  }
+
+  _onVisibilityChange() {
+    if (document.visibilityState === 'visible' && this.hass && this._selectedProvider) {
+      this._chatHistoryLoaded = false;
+      this._loadChatHistory();
+    }
   }
 
   async updated(changedProps) {

@@ -17,6 +17,7 @@ from homeassistant.helpers.selector import (
 
 import aiohttp
 
+from .agent import get_default_system_prompt_content_for_provider
 from .const import (
     CONF_LANGUAGE,
     CONF_LOCAL_MODEL,
@@ -680,10 +681,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+            _default_prompt = self.config_entry.data.get(CONF_SYSTEM_PROMPT, "") or get_default_system_prompt_content_for_provider(provider)
             _add_system_prompt_fields(
                 schema_dict,
                 default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
-                default_prompt=self.config_entry.data.get(CONF_SYSTEM_PROMPT, ""),
+                default_prompt=_default_prompt,
             )
 
             return self.async_show_form(
@@ -716,10 +718,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+            _default_prompt = self.config_entry.data.get(CONF_SYSTEM_PROMPT, "") or get_default_system_prompt_content_for_provider(provider)
             _add_system_prompt_fields(
                 schema_dict,
                 default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
-                default_prompt=self.config_entry.data.get(CONF_SYSTEM_PROMPT, ""),
+                default_prompt=_default_prompt,
             )
 
             return self.async_show_form(

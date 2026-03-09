@@ -1428,17 +1428,34 @@ class AiAgentHaAgent:
                 self._custom_system_prompt = prompt_str if prompt_str else None
             self._apply_system_prompt()
         else:
-            # Migration: load from Store for old configs
+            # Migration: load from Store for old configs; fall back to config for language
             provider = self.config.get("ai_provider", "openai")
             store: Store = Store(self.hass, 1, f"ai_agent_ha_settings_{provider}")
             try:
                 data = await store.async_load()
                 if data:
                     self._custom_system_prompt = data.get(CONF_SYSTEM_PROMPT)
-                    self._language = data.get(CONF_LANGUAGE)
+                    self._language = (
+                        data.get(CONF_LANGUAGE)
+                        or self.config.get(CONF_LANGUAGE)
+                        or DEFAULT_LANGUAGE
+                    )
+                    if self._language:
+                        self._language = str(self._language).strip() or DEFAULT_LANGUAGE
+                    self._apply_system_prompt()
+                else:
+                    self._language = (
+                        str(self.config.get(CONF_LANGUAGE) or DEFAULT_LANGUAGE).strip()
+                        or DEFAULT_LANGUAGE
+                    )
                     self._apply_system_prompt()
             except Exception as e:
                 _LOGGER.debug("Could not load settings from Store: %s", e)
+                self._language = (
+                    str(self.config.get(CONF_LANGUAGE) or DEFAULT_LANGUAGE).strip()
+                    or DEFAULT_LANGUAGE
+                )
+                self._apply_system_prompt()
         self._settings_loaded = True
 
     def _apply_system_prompt(self) -> None:
@@ -1448,11 +1465,14 @@ class AiAgentHaAgent:
             base_content = self._custom_system_prompt.strip()
         else:
             base_content = self._default_system_prompt.get("content", "")
-        if self._language and self._language.strip():
+        lang = (self._language or "").strip()
+        if lang:
             lang_instruction = (
-                f"LANGUAGE: Respond in {self._language.strip()}.\n\n"
+                f"LANGUAGE: Always respond in {lang}. "
+                "All user-facing text (messages, responses, explanations) must be in this language.\n\n"
             )
             base_content = lang_instruction + base_content
+            base_content = base_content.rstrip() + f"\n\nRespond only in {lang}."
         self.system_prompt = {"role": "system", "content": base_content}
 
     async def _execute_data_request(
@@ -1519,6 +1539,20 @@ class AiAgentHaAgent:
             _LOGGER.exception("Error executing data request: %s", str(e))
             return {"error": str(e)}
 
+    def _remove_none_from_automation_data(self, obj: Any) -> Any:
+        """Recursively remove keys with None values so HA schema validation passes (e.g. delay: null)."""
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return {
+                k: self._remove_none_from_automation_data(v)
+                for k, v in obj.items()
+                if v is not None
+            }
+        if isinstance(obj, list):
+            return [self._remove_none_from_automation_data(item) for item in obj]
+        return obj
+
     def _sanitize_automation_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize automation configuration to prevent injection attacks."""
         sanitized: Dict[str, Any] = {}
@@ -1527,9 +1561,9 @@ class AiAgentHaAgent:
                 # Sanitize strings
                 sanitized[key] = str(value).strip()[:100]  # Limit length
             elif key in ["trigger", "condition", "action"]:
-                # Validate arrays
+                # Validate arrays and remove None values for HA schema (e.g. delay: null)
                 if isinstance(value, list):
-                    sanitized[key] = value
+                    sanitized[key] = self._remove_none_from_automation_data(value)
             elif key == "mode":
                 # Validate mode
                 if value in ["single", "restart", "queued", "parallel"]:
@@ -4137,6 +4171,8 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 self.hass, 1, f"ai_agent_ha_chat_{provider}_{user_id}"
             )
             await store.async_save({"messages": messages})
+            if not messages:
+                self.clear_conversation_history()
             return {"success": True}
         except Exception as e:
             _LOGGER.exception("Error saving chat history: %s", str(e))
@@ -4185,3 +4221,10 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                 }
             )
         return result
+
+
+def get_default_system_prompt_content_for_provider(provider: str) -> str:
+    """Return the default system prompt content for local/ollama provider, else empty string."""
+    if provider in ("local", "ollama"):
+        return AiAgentHaAgent.SYSTEM_PROMPT_LOCAL.get("content", "")
+    return ""
