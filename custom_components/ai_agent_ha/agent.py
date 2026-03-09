@@ -12,6 +12,7 @@ ai_agent_ha:
   zai_token: "..."
   zai_endpoint: "general"  # or 'coding' for z.ai (3× usage, 1/7 cost)
   local_url: "http://localhost:11434/api/generate"  # Required for local models
+  ollama_url: "http://localhost:11434"  # For Ollama (local)
   # Model configuration (optional, defaults will be used if not specified)
   models:
     openai: "gpt-3.5-turbo"  # or "gpt-4", "gpt-4-turbo", etc.
@@ -22,6 +23,7 @@ ai_agent_ha:
     alter: "your-model-name"  # model name for Alter API
     zai: "glm-4.7"  # model name for z.ai API (glm-4.7, glm-4.6, glm-4.5, etc.)
     local: "llama3.2"  # model name for local API (optional if your API doesn't require it)
+    ollama: "llama3.2"  # model name for Ollama
 """
 
 import asyncio
@@ -111,6 +113,86 @@ def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
 class BaseAIClient:
     async def get_response(self, messages, **kwargs):
         raise NotImplementedError
+
+
+class OllamaClient(BaseAIClient):
+    """Client for local Ollama API using /api/chat endpoint."""
+
+    def __init__(self, base_url: str, model: str = ""):
+        self.base_url = base_url.rstrip("/")
+        self.model = model or "llama3.2"
+        self.chat_url = f"{self.base_url}/api/chat"
+
+    async def get_response(self, messages, **kwargs):
+        _LOGGER.debug(
+            "Making request to Ollama /api/chat with model '%s' at %s",
+            self.model,
+            self.chat_url,
+        )
+        headers = {"Content-Type": "application/json"}
+
+        # Convert messages to Ollama format (role + content)
+        ollama_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role in ("system", "user", "assistant"):
+                ollama_messages.append({"role": role, "content": content})
+
+        payload = {
+            "model": self.model,
+            "messages": ollama_messages,
+            "stream": False,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self.chat_url,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    _LOGGER.error("Ollama API error %d: %s", resp.status, error_text)
+                    if resp.status == 404:
+                        raise Exception(
+                            f"Model '{self.model}' nicht gefunden. "
+                            f"Installiere es mit: ollama pull {self.model}"
+                        )
+                    raise Exception(f"Ollama API Fehler {resp.status}: {error_text}")
+
+                data = await resp.json()
+                msg = data.get("message", {})
+                content = msg.get("content", "")
+
+                if not content or not content.strip():
+                    if data.get("done_reason") == "load":
+                        return json.dumps(
+                            {
+                                "request_type": "final_response",
+                                "response": "Das Modell wird noch geladen. Bitte kurz warten.",
+                            }
+                        )
+                    return json.dumps(
+                        {
+                            "request_type": "final_response",
+                            "response": "Leere Antwort vom Modell. Bitte erneut versuchen.",
+                        }
+                    )
+
+                content = content.strip()
+                if content.startswith("{") and content.endswith("}"):
+                    try:
+                        parsed = json.loads(content)
+                        if isinstance(parsed, dict) and "request_type" in parsed:
+                            return content
+                    except json.JSONDecodeError:
+                        pass
+
+                return json.dumps(
+                    {"request_type": "final_response", "response": content}
+                )
 
 
 class LocalClient(BaseAIClient):
@@ -1160,7 +1242,7 @@ class AiAgentHaAgent:
         _LOGGER.debug("Models config loaded: %s", models_config)
 
         # Set the appropriate system prompt based on provider
-        if provider == "local":
+        if provider in ("local", "ollama"):
             self.system_prompt = self.SYSTEM_PROMPT_LOCAL
             _LOGGER.debug("Using local-optimized system prompt")
         else:
@@ -1194,6 +1276,13 @@ class AiAgentHaAgent:
                 _LOGGER.error("Missing local_url for local provider")
                 raise Exception("Missing local_url configuration for local provider")
             self.ai_client = LocalClient(url, model)
+        elif provider == "ollama":
+            model = models_config.get("ollama", "llama3.2")
+            base_url = config.get("ollama_url")
+            if not base_url:
+                _LOGGER.error("Missing ollama_url for Ollama provider")
+                raise Exception("Missing ollama_url configuration for Ollama provider")
+            self.ai_client = OllamaClient(base_url, model)
         else:  # default to llama if somehow specified
             model = models_config.get("llama", "Llama-4-Maverick-17B-128E-Instruct-FP8")
             self.ai_client = LlamaClient(config.get("llama_token"), model)
@@ -1222,14 +1311,16 @@ class AiAgentHaAgent:
             token = self.config.get("zai_token")
         elif provider == "local":
             token = self.config.get("local_url")
+        elif provider == "ollama":
+            token = self.config.get("ollama_url")
         else:
             token = self.config.get("llama_token")
 
         if not token or not isinstance(token, str):
             return False
 
-        # For local provider, validate URL format
-        if provider == "local":
+        # For local and ollama providers, validate URL format
+        if provider in ("local", "ollama"):
             return bool(token.startswith(("http://", "https://")))
 
         # Add more specific validation based on your API key format
@@ -2642,6 +2733,11 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     "model": models_config.get("local", ""),
                     "client_class": LocalClient,
                 },
+                "ollama": {
+                    "token_key": "ollama_url",
+                    "model": models_config.get("ollama", "llama3.2"),
+                    "client_class": OllamaClient,
+                },
             }
 
             # Validate provider and get configuration
@@ -2666,7 +2762,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
             # Validate token/URL
             if not token:
-                error_msg = f"No {'URL' if selected_provider == 'local' else 'token'} configured for provider {selected_provider}"
+                error_msg = f"No {'URL' if selected_provider in ('local', 'ollama') else 'token'} configured for provider {selected_provider}"
                 _LOGGER.error(error_msg)
                 return _with_debug({"success": False, "error": error_msg})
 
@@ -2687,6 +2783,14 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     # LocalClient takes (url, model)
                     self.ai_client = provider_settings["client_class"](
                         url=token, model=provider_settings["model"]
+                    )
+                    _LOGGER.debug(
+                        f"Initialized {selected_provider} client with model {provider_settings['model']}"
+                    )
+                elif selected_provider == "ollama":
+                    # OllamaClient takes (base_url, model)
+                    self.ai_client = provider_settings["client_class"](
+                        base_url=token, model=provider_settings["model"]
                     )
                     _LOGGER.debug(
                         f"Initialized {selected_provider} client with model {provider_settings['model']}"
@@ -3295,9 +3399,9 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                         )
 
                     except json.JSONDecodeError as e:
-                        # Check if this is a local provider that might have already wrapped the response
+                        # Check if this is a local/ollama provider that might have already wrapped the response
                         provider = self.config.get("ai_provider", "unknown")
-                        if provider == "local":
+                        if provider in ("local", "ollama"):
                             _LOGGER.debug(
                                 "Local provider returned non-JSON response (this is normal and handled): %s",
                                 response[:200],
