@@ -89,6 +89,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "alter",
             "zai",
             "local",
+            "ollama",
         ]:
             _LOGGER.error("Unknown AI provider: %s", provider)
             raise ConfigEntryNotReady(f"Unknown AI provider: {provider}")

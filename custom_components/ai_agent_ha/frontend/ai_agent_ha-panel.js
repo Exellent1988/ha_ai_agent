@@ -15,6 +15,7 @@ const PROVIDERS = {
   alter: "Alter",
   zai: "z.ai",
   local: "Local Model",
+  ollama: "Ollama (lokal)",
 };
 
 class AiAgentHaPanel extends LitElement {

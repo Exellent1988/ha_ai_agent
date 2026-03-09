@@ -14,6 +14,7 @@ CONF_ALTER_TOKEN = "alter_token"  # nosec B105
 CONF_ZAI_TOKEN = "zai_token"  # nosec B105
 CONF_LOCAL_URL = "local_url"
 CONF_LOCAL_MODEL = "local_model"
+CONF_OLLAMA_URL = "ollama_url"
 
 # Available AI providers
 AI_PROVIDERS = [
@@ -25,6 +26,7 @@ AI_PROVIDERS = [
     "alter",
     "zai",
     "local",
+    "ollama",
 ]
 
 # AI Provider constants

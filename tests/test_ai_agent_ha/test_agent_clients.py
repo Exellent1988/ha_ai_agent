@@ -11,6 +11,26 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
+class TestOllamaClient:
+    """Test Ollama AI client functionality."""
+
+    def test_ollama_client_initialization(self):
+        """Test OllamaClient initialization."""
+        try:
+            from custom_components.ai_agent_ha.agent import OllamaClient
+
+            client = OllamaClient("http://localhost:11434", "llama3.2")
+            assert client.base_url == "http://localhost:11434"
+            assert client.model == "llama3.2"
+            assert client.chat_url == "http://localhost:11434/api/chat"
+
+            # Test default model
+            client_default = OllamaClient("http://localhost:11434")
+            assert client_default.model == "llama3.2"
+        except ImportError:
+            pytest.skip("OllamaClient not available")
+
+
 class TestLocalClient:
     """Test Local AI client functionality."""
 

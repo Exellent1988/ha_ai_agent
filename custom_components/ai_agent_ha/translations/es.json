@@ -34,6 +34,7 @@
         },
         "error": {
             "invalid_api_key": "Clave o token de API no válido",
+            "invalid_url": "URL no válida. Debe comenzar con http:// o https://",
             "llama_token": "Se requiere el token de la API de Llama",
             "openai_token": "Se requiere la clave de la API de OpenAI",
             "gemini_token": "Se requiere la clave de la API de Google Gemini",

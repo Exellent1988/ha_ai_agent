@@ -38,6 +38,7 @@
         },
         "error": {
             "invalid_api_key": "Invalid API key format",
+            "invalid_url": "Invalid URL. Must start with http:// or https://",
             "unknown": "Unknown error occurred",
             "llama_token": "Llama API token is required",
             "openai_token": "OpenAI API key is required",

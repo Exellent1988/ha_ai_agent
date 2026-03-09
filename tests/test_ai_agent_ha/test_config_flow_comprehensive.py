@@ -75,7 +75,7 @@ class TestConfigFlowComprehensive:
             assert isinstance(AI_PROVIDERS, list)
             assert len(AI_PROVIDERS) > 0
             
-            expected_providers = ["llama", "openai", "gemini", "openrouter", "anthropic", "local"]
+            expected_providers = ["llama", "openai", "gemini", "openrouter", "anthropic", "local", "ollama"]
             for provider in expected_providers:
                 assert provider in AI_PROVIDERS
                 
@@ -145,7 +145,8 @@ class TestConfigFlowComprehensive:
                 "gemini": "Google Gemini",
                 "openrouter": "OpenRouter",
                 "anthropic": "Anthropic",
-                "local": "Local Model"
+                "local": "Local Model",
+                "ollama": "Ollama (lokal)",
             }
             
             for provider_key, provider_name in expected_providers.items():
