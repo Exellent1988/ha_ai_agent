@@ -71,6 +71,44 @@ create_automation:
             - "zai"
             - "local"
 
+save_system_prompt_settings:
+  name: "Save System Prompt Settings"
+  description: "Save custom system prompt and/or language for the AI agent."
+  fields:
+    provider:
+      description: "The AI provider (openai, ollama, etc.)."
+      example: "ollama"
+    system_prompt:
+      description: "Custom system prompt (optional, empty to reset)."
+      example: ""
+    language:
+      description: "Language for responses (e.g. German, English)."
+      example: "German"
+
+load_system_prompt_settings:
+  name: "Load System Prompt Settings"
+  description: "Load custom system prompt and language settings."
+  fields:
+    provider:
+      description: "The AI provider."
+      example: "ollama"
+
+save_chat_history:
+  name: "Save Chat History"
+  description: "Save the current chat conversation."
+  fields:
+    provider:
+      description: "The AI provider."
+    messages:
+      description: "Array of chat messages to save."
+
+load_chat_history:
+  name: "Load Chat History"
+  description: "Load saved chat conversation."
+  fields:
+    provider:
+      description: "The AI provider."
+
 update_dashboard:
   name: "Update Dashboard via AI Agent"
   description: "Update an existing Home Assistant dashboard using AI assistance."

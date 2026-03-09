@@ -37,7 +37,11 @@ class AiAgentHaPanel extends LitElement {
       _showProviderDropdown: { type: Boolean, reflect: false, attribute: false },
       _showThinking: { type: Boolean, reflect: false, attribute: false },
       _thinkingExpanded: { type: Boolean, reflect: false, attribute: false },
-      _debugInfo: { type: Object, reflect: false, attribute: false }
+      _debugInfo: { type: Object, reflect: false, attribute: false },
+      _showSettingsDialog: { type: Boolean, reflect: false, attribute: false },
+      _systemPrompt: { type: String, reflect: false, attribute: false },
+      _language: { type: String, reflect: false, attribute: false },
+      _lastDebugInfo: { type: Object, reflect: false, attribute: false }
     };
   }
 
@@ -609,6 +613,54 @@ class AiAgentHaPanel extends LitElement {
         font-size: 14px;
         padding: 8px;
       }
+      .header-actions {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .icon-button {
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        padding: 8px;
+        border-radius: 8px;
+        color: var(--app-header-text-color);
+      }
+      .icon-button:hover {
+        background: rgba(255,255,255,0.1);
+      }
+      .icon-button ha-icon {
+        --mdc-icon-size: 24px;
+      }
+      ha-dialog {
+        --mdc-dialog-min-width: 500px;
+        --mdc-dialog-max-width: 90vw;
+      }
+      .settings-dialog-content {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .settings-dialog-content label {
+        font-weight: 500;
+        margin-bottom: 4px;
+      }
+      .settings-dialog-content textarea {
+        width: 100%;
+        min-height: 200px;
+        padding: 12px;
+        border: 1px solid var(--divider-color);
+        border-radius: 8px;
+        font-family: monospace;
+        font-size: 12px;
+      }
+      .settings-dialog-content input {
+        width: 100%;
+        padding: 12px;
+        border: 1px solid var(--divider-color);
+        border-radius: 8px;
+      }
     `;
   }
 
@@ -645,6 +697,11 @@ class AiAgentHaPanel extends LitElement {
     this._showThinking = false;
     this._thinkingExpanded = false;
     this._debugInfo = null;
+    this._showSettingsDialog = false;
+    this._systemPrompt = '';
+    this._language = '';
+    this._lastDebugInfo = null;
+    this._chatHistoryLoaded = false;
     console.debug("AI Agent HA Panel constructor called");
   }
 
@@ -736,15 +793,21 @@ class AiAgentHaPanel extends LitElement {
       this.requestUpdate();
     }
 
-    // Load prompt history when hass becomes available and we haven't loaded it yet
+    // Load prompt history and chat history when hass becomes available
     if (changedProps.has('hass') && this.hass && !this._promptHistoryLoaded) {
       this._promptHistoryLoaded = true;
       await this._loadPromptHistory();
+    }
+    if (changedProps.has('hass') && this.hass && this._selectedProvider && !this._chatHistoryLoaded) {
+      this._chatHistoryLoaded = true;
+      await this._loadChatHistory();
     }
 
     // Load prompt history when provider changes
     if (changedProps.has('_selectedProvider') && this._selectedProvider && this.hass) {
       await this._loadPromptHistory();
+      this._chatHistoryLoaded = false;
+      await this._loadChatHistory();
     }
 
     if (changedProps.has('_messages') || changedProps.has('_isLoading')) {
@@ -956,61 +1019,28 @@ class AiAgentHaPanel extends LitElement {
       <div class="header">
         <ha-icon icon="mdi:robot"></ha-icon>
         AI Agent HA
-        <button
-          class="clear-button"
-          @click=${this._clearChat}
-          ?disabled=${this._isLoading}
-        >
-          <ha-icon icon="mdi:delete-sweep"></ha-icon>
-          <span>Clear Chat</span>
-        </button>
+        <div class="header-actions">
+          <button class="icon-button" @click=${this._exportChat} title="Chat exportieren">
+            <ha-icon icon="mdi:download"></ha-icon>
+          </button>
+          <button class="icon-button" @click=${this._openSettings} title="Einstellungen">
+            <ha-icon icon="mdi:cog"></ha-icon>
+          </button>
+          <button
+            class="clear-button"
+            @click=${this._clearChat}
+            ?disabled=${this._isLoading}
+          >
+            <ha-icon icon="mdi:delete-sweep"></ha-icon>
+            <span>Clear Chat</span>
+          </button>
+        </div>
       </div>
+      ${this._showSettingsDialog ? this._renderSettingsDialog() : ''}
       <div class="content">
         <div class="chat-container">
           <div class="messages" id="messages">
-            ${this._messages.map(msg => html`
-              <div class="message ${msg.type}-message">
-                ${msg.text}
-                ${msg.automation ? html`
-                  <div class="automation-suggestion">
-                    <div class="automation-title">${msg.automation.alias}</div>
-                    <div class="automation-description">${msg.automation.description}</div>
-                    <div class="automation-details">
-                      ${JSON.stringify(msg.automation, null, 2)}
-                    </div>
-                    <div class="automation-actions">
-                      <ha-button
-                        @click=${() => this._approveAutomation(msg.automation)}
-                        .disabled=${this._isLoading}
-                      >Approve</ha-button>
-                      <ha-button
-                        @click=${() => this._rejectAutomation()}
-                        .disabled=${this._isLoading}
-                      >Reject</ha-button>
-                    </div>
-                  </div>
-                ` : ''}
-                ${msg.dashboard ? html`
-                  <div class="dashboard-suggestion">
-                    <div class="dashboard-title">${msg.dashboard.title}</div>
-                    <div class="dashboard-description">Dashboard with ${msg.dashboard.views ? msg.dashboard.views.length : 0} view(s)</div>
-                    <div class="dashboard-details">
-                      ${JSON.stringify(msg.dashboard, null, 2)}
-                    </div>
-                    <div class="dashboard-actions">
-                      <ha-button
-                        @click=${() => this._approveDashboard(msg.dashboard)}
-                        .disabled=${this._isLoading}
-                      >Create Dashboard</ha-button>
-                      <ha-button
-                        @click=${() => this._rejectDashboard()}
-                        .disabled=${this._isLoading}
-                      >Cancel</ha-button>
-                    </div>
-                  </div>
-                ` : ''}
-              </div>
-            `)}
+            ${this._messages.map(msg => this._renderMessage(msg))}
             ${this._isLoading ? html`
               <div class="loading">
                 <span>AI Agent is thinking</span>
@@ -1077,6 +1107,67 @@ class AiAgentHaPanel extends LitElement {
             </div>
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  _renderMessage(msg) {
+    let automation = msg.automation;
+    let dashboard = msg.dashboard;
+    let text = msg.text || '';
+    if (!automation && !dashboard && msg.type === 'assistant' && typeof text === 'string' && text.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed.request_type === 'automation_suggestion' && parsed.automation) {
+          automation = parsed.automation;
+          text = parsed.message || text;
+        } else if (parsed.request_type === 'dashboard_suggestion' && parsed.dashboard) {
+          dashboard = parsed.dashboard;
+          text = parsed.message || text;
+        }
+      } catch (_) {}
+    }
+    return html`
+      <div class="message ${msg.type}-message">
+        ${text}
+        ${automation ? html`
+          <div class="automation-suggestion">
+            <div class="automation-title">${automation.alias}</div>
+            <div class="automation-description">${automation.description}</div>
+            <div class="automation-details">
+              ${JSON.stringify(automation, null, 2)}
+            </div>
+            <div class="automation-actions">
+              <ha-button
+                @click=${() => this._approveAutomation(automation)}
+                .disabled=${this._isLoading}
+              >Approve</ha-button>
+              <ha-button
+                @click=${() => this._rejectAutomation()}
+                .disabled=${this._isLoading}
+              >Reject</ha-button>
+            </div>
+          </div>
+        ` : ''}
+        ${dashboard ? html`
+          <div class="dashboard-suggestion">
+            <div class="dashboard-title">${dashboard.title}</div>
+            <div class="dashboard-description">Dashboard with ${dashboard.views ? dashboard.views.length : 0} view(s)</div>
+            <div class="dashboard-details">
+              ${JSON.stringify(dashboard, null, 2)}
+            </div>
+            <div class="dashboard-actions">
+              <ha-button
+                @click=${() => this._approveDashboard(dashboard)}
+                .disabled=${this._isLoading}
+              >Create Dashboard</ha-button>
+              <ha-button
+                @click=${() => this._rejectDashboard()}
+                .disabled=${this._isLoading}
+              >Cancel</ha-button>
+            </div>
+          </div>
+        ` : ''}
       </div>
     `;
   }
@@ -1190,6 +1281,7 @@ class AiAgentHaPanel extends LitElement {
     try {
       this._clearLoadingState();
       this._debugInfo = this._showThinking ? (event.data.debug || null) : null;
+      this._lastDebugInfo = event.data.debug || this._lastDebugInfo;
       if (this._showThinking && this._debugInfo) {
         this._thinkingExpanded = true;
       }
@@ -1204,7 +1296,11 @@ class AiAgentHaPanel extends LitElement {
         return;
       }
 
-      let message = { type: 'assistant', text: event.data.answer };
+      let message = {
+        type: 'assistant',
+        text: event.data.answer,
+        debugInfo: event.data.debug || null
+      };
 
       // Check if the response contains an automation or dashboard suggestion
       try {
@@ -1280,9 +1376,18 @@ class AiAgentHaPanel extends LitElement {
 
       // The result should be an object with a message property
       if (result && result.message) {
+        if (result.error) {
+          this._error = result.error;
+        }
         this._messages = [...this._messages, {
           type: 'assistant',
           text: result.message
+        }];
+      } else if (result && result.error) {
+        this._error = result.error;
+        this._messages = [...this._messages, {
+          type: 'assistant',
+          text: result.error
         }];
       } else {
         // Fallback success message if no message is provided
@@ -1362,7 +1467,12 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_showPromptHistory') ||
            changedProps.has('_availableProviders') ||
            changedProps.has('_selectedProvider') ||
-           changedProps.has('_showProviderDropdown');
+           changedProps.has('_showProviderDropdown') ||
+           changedProps.has('_showSettingsDialog') ||
+           changedProps.has('_systemPrompt') ||
+           changedProps.has('_language') ||
+           changedProps.has('_debugInfo') ||
+           changedProps.has('_showThinking');
   }
 
   _clearChat() {
@@ -1371,7 +1481,120 @@ class AiAgentHaPanel extends LitElement {
     this._error = null;
     this._pendingAutomation = null;
     this._debugInfo = null;
+    this._lastDebugInfo = null;
+    this._chatHistoryLoaded = false;
+    if (this.hass && this._selectedProvider) {
+      this.hass.callService('ai_agent_ha', 'save_chat_history', {
+        provider: this._selectedProvider,
+        messages: []
+      }).catch(() => {});
+    }
     // Don't clear prompt history - users might want to keep it
+  }
+
+  async _loadChatHistory() {
+    if (!this.hass || !this._selectedProvider) return;
+    try {
+      const result = await this.hass.callService('ai_agent_ha', 'load_chat_history', {
+        provider: this._selectedProvider
+      });
+      if (result && result.messages && result.messages.length > 0) {
+        this._messages = result.messages;
+        this._chatHistoryLoaded = true;
+        this.requestUpdate();
+      }
+    } catch (e) {
+      console.debug('Could not load chat history:', e);
+    }
+  }
+
+  _openSettings() {
+    this._showSettingsDialog = true;
+    this._loadSystemPromptSettings();
+    this.requestUpdate();
+  }
+
+  async _loadSystemPromptSettings() {
+    if (!this.hass || !this._selectedProvider) return;
+    try {
+      const result = await this.hass.callService('ai_agent_ha', 'load_system_prompt_settings', {
+        provider: this._selectedProvider
+      });
+      if (result && !result.error) {
+        this._systemPrompt = result.system_prompt || '';
+        this._language = result.language || '';
+      }
+    } catch (e) {
+      console.debug('Could not load system prompt settings:', e);
+    }
+    this.requestUpdate();
+  }
+
+  async _saveSystemPromptSettings() {
+    if (!this.hass || !this._selectedProvider) return;
+    try {
+      await this.hass.callService('ai_agent_ha', 'save_system_prompt_settings', {
+        provider: this._selectedProvider,
+        system_prompt: this._systemPrompt,
+        language: this._language
+      });
+      this._showSettingsDialog = false;
+      this.requestUpdate();
+    } catch (e) {
+      console.error('Could not save system prompt settings:', e);
+    }
+  }
+
+  _exportChat() {
+    const exportData = {
+      exportedAt: new Date().toISOString(),
+      provider: this._selectedProvider,
+      messages: this._messages,
+      lastThinkingTrace: this._lastDebugInfo || null
+    };
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ai_agent_ha_chat_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  _renderSettingsDialog() {
+    return html`
+      <ha-dialog
+        open
+        .heading=${'Einstellungen'}
+        @closed=${() => { this._showSettingsDialog = false; this.requestUpdate(); }}
+      >
+        <div class="settings-dialog-content">
+          <div>
+            <label>Sprache (z.B. Deutsch, English)</label>
+            <input
+              type="text"
+              .value=${this._language}
+              @input=${e => this._language = e.target.value}
+              placeholder="Leer = Standard"
+            />
+          </div>
+          <div>
+            <label>System-Prompt (leer = Standard)</label>
+            <textarea
+              .value=${this._systemPrompt}
+              @input=${e => this._systemPrompt = e.target.value}
+              placeholder="Eigener System-Prompt - leer lassen für Standard"
+            ></textarea>
+          </div>
+        </div>
+        <ha-button slot="primaryAction" @click=${() => this._saveSystemPromptSettings()}>
+          Speichern
+        </ha-button>
+        <ha-button slot="secondaryAction" dialogAction="cancel">
+          Abbrechen
+        </ha-button>
+      </ha-dialog>
+    `;
   }
 
   _resolveProviderFromEntry(entry) {

@@ -31,6 +31,8 @@ AI_PROVIDERS = [
 
 # AI Provider constants
 CONF_MODELS = "models"
+CONF_SYSTEM_PROMPT = "system_prompt"
+CONF_LANGUAGE = "language"
 
 # Supported AI providers
 DEFAULT_AI_PROVIDER = "openai"

@@ -40,7 +40,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_WEATHER_ENTITY, DOMAIN
+from .const import CONF_LANGUAGE, CONF_SYSTEM_PROMPT, CONF_WEATHER_ENTITY, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,10 +139,12 @@ class OllamaClient(BaseAIClient):
             if role in ("system", "user", "assistant"):
                 ollama_messages.append({"role": role, "content": content})
 
+        # keep_alive: 15 minutes - prevents Ollama from unloading model between requests
         payload = {
             "model": self.model,
             "messages": ollama_messages,
             "stream": False,
+            "keep_alive": "15m",
         }
 
         async with aiohttp.ClientSession() as session:
@@ -1276,13 +1278,17 @@ class AiAgentHaAgent:
         _LOGGER.debug("Initializing AiAgentHaAgent with provider: %s", provider)
         _LOGGER.debug("Models config loaded: %s", models_config)
 
-        # Set the appropriate system prompt based on provider
+        # Set the appropriate system prompt based on provider (can be overridden by custom prompt from Store)
         if provider in ("local", "ollama"):
-            self.system_prompt = self.SYSTEM_PROMPT_LOCAL
+            self._default_system_prompt = self.SYSTEM_PROMPT_LOCAL
             _LOGGER.debug("Using local-optimized system prompt")
         else:
-            self.system_prompt = self.SYSTEM_PROMPT
+            self._default_system_prompt = self.SYSTEM_PROMPT
             _LOGGER.debug("Using standard system prompt")
+        self.system_prompt = self._default_system_prompt
+        self._custom_system_prompt: Optional[str] = None
+        self._language: Optional[str] = None
+        self._settings_loaded = False
 
         # Initialize the appropriate AI client with model selection
         if provider == "openai":
@@ -1386,6 +1392,36 @@ class AiAgentHaAgent:
     def _set_cached_data(self, key: str, data: Any) -> None:
         """Store data in cache with timestamp."""
         self._cache[key] = (time.time(), data)
+
+    async def _load_settings(self) -> None:
+        """Load custom system prompt and language from Store."""
+        if self._settings_loaded:
+            return
+        provider = self.config.get("ai_provider", "openai")
+        store: Store = Store(self.hass, 1, f"ai_agent_ha_settings_{provider}")
+        try:
+            data = await store.async_load()
+            if data:
+                self._custom_system_prompt = data.get(CONF_SYSTEM_PROMPT)
+                self._language = data.get(CONF_LANGUAGE)
+                self._apply_system_prompt()
+        except Exception as e:
+            _LOGGER.debug("Could not load settings: %s", e)
+        self._settings_loaded = True
+
+    def _apply_system_prompt(self) -> None:
+        """Apply custom system prompt and language to self.system_prompt."""
+        base_content: str
+        if self._custom_system_prompt and self._custom_system_prompt.strip():
+            base_content = self._custom_system_prompt.strip()
+        else:
+            base_content = self._default_system_prompt.get("content", "")
+        if self._language and self._language.strip():
+            lang_instruction = (
+                f"LANGUAGE: Respond in {self._language.strip()}.\n\n"
+            )
+            base_content = lang_instruction + base_content
+        self.system_prompt = {"role": "system", "content": base_content}
 
     def _sanitize_automation_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize automation configuration to prevent injection attacks."""
@@ -2161,8 +2197,47 @@ class AiAgentHaAgent:
                 )
             )
 
-            # Reload automations
-            await self.hass.services.async_call("automation", "reload")
+            # Reload automations - catch errors (invalid config etc.)
+            try:
+                await self.hass.services.async_call("automation", "reload")
+            except Exception as reload_err:
+                _LOGGER.warning("Automation reload failed: %s", reload_err)
+                return {
+                    "error": (
+                        f"Die Automation wurde angelegt, aber die Konfiguration enthält "
+                        f"Fehler. Bitte in Einstellungen > Automatisierungen prüfen. "
+                        f"Fehler: {str(reload_err)}"
+                    ),
+                    "message": (
+                        f"Die Automation '{automation_entry['alias']}' wurde angelegt, "
+                        f"ist aber wegen Konfigurationsfehlern nicht aktiv. "
+                        f"Bitte in Einstellungen > Automatisierungen die Fehler beheben. "
+                        f"Fehler: {str(reload_err)}"
+                    ),
+                }
+
+            # Check if automation is active after reload (config errors may disable it)
+            await asyncio.sleep(1)
+            entity_id = f"automation.{automation_id}"
+            state = self.hass.states.get(entity_id)
+            if state and state.state == "unavailable":
+                error_attr = state.attributes.get("error") or state.attributes.get(
+                    "message", ""
+                )
+                error_msg = error_attr or "Unbekannter Konfigurationsfehler"
+                return {
+                    "error": (
+                        f"Die Automation '{automation_entry['alias']}' "
+                        f"({entity_id}) ist nicht aktiv, da die Konfiguration "
+                        f"Fehler aufweist. {error_msg}"
+                    ),
+                    "message": (
+                        f"Die Automation '{automation_entry['alias']}' wurde angelegt, "
+                        f"ist aber wegen Konfigurationsfehlern nicht aktiv. "
+                        f"Bitte in Einstellungen > Automatisierungen die Fehler beheben. "
+                        f"Fehler: {error_msg}"
+                    ),
+                }
 
             # Clear automation-related caches
             self._cache.clear()
@@ -2701,12 +2776,20 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             return {"error": f"Error updating dashboard: {str(e)}"}
 
     async def process_query(
-        self, user_query: str, provider: Optional[str] = None, debug: bool = False
+        self,
+        user_query: str,
+        provider: Optional[str] = None,
+        debug: bool = False,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Process a user query with input validation and rate limiting."""
+        uid = user_id or "default"
         try:
             if not user_query or not isinstance(user_query, str):
                 return {"success": False, "error": "Invalid query format"}
+
+            await self._load_settings()
+            await self.load_chat_history(uid)
 
             # Get the correct configuration for the requested provider
             if provider and provider in self.hass.data[DOMAIN]["configs"]:
@@ -3589,6 +3672,14 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             return _with_debug(
                 {"success": False, "error": f"Error in process_query: {str(e)}"}
             )
+        finally:
+            if uid:
+                try:
+                    await self.save_chat_history(
+                        uid, self._conversation_to_messages(self.conversation_history)
+                    )
+                except Exception as save_err:
+                    _LOGGER.debug("Could not save chat history: %s", save_err)
 
     def _build_debug_trace(
         self,
@@ -3869,3 +3960,96 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         except Exception as e:
             _LOGGER.exception("Error loading prompt history: %s", str(e))
             return {"error": f"Error loading prompt history: {str(e)}", "history": []}
+
+    async def save_system_prompt_settings(
+        self, system_prompt: Optional[str] = None, language: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Save custom system prompt and/or language to Store."""
+        try:
+            provider = self.config.get("ai_provider", "openai")
+            store: Store = Store(self.hass, 1, f"ai_agent_ha_settings_{provider}")
+            data = await store.async_load() or {}
+            if system_prompt is not None:
+                data[CONF_SYSTEM_PROMPT] = system_prompt
+            if language is not None:
+                data[CONF_LANGUAGE] = language
+            await store.async_save(data)
+            self._custom_system_prompt = data.get(CONF_SYSTEM_PROMPT)
+            self._language = data.get(CONF_LANGUAGE)
+            self._apply_system_prompt()
+            return {"success": True}
+        except Exception as e:
+            _LOGGER.exception("Error saving system prompt settings: %s", str(e))
+            return {"error": str(e)}
+
+    async def load_system_prompt_settings(self) -> Dict[str, Any]:
+        """Load custom system prompt and language from Store."""
+        try:
+            await self._load_settings()
+            return {
+                "success": True,
+                CONF_SYSTEM_PROMPT: self._custom_system_prompt or "",
+                CONF_LANGUAGE: self._language or "",
+            }
+        except Exception as e:
+            _LOGGER.exception("Error loading system prompt settings: %s", str(e))
+            return {"error": str(e), CONF_SYSTEM_PROMPT: "", CONF_LANGUAGE: ""}
+
+    async def save_chat_history(
+        self, user_id: str, messages: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Save conversation history to Store."""
+        try:
+            provider = self.config.get("ai_provider", "openai")
+            store: Store = Store(
+                self.hass, 1, f"ai_agent_ha_chat_{provider}_{user_id}"
+            )
+            await store.async_save({"messages": messages})
+            return {"success": True}
+        except Exception as e:
+            _LOGGER.exception("Error saving chat history: %s", str(e))
+            return {"error": str(e)}
+
+    async def load_chat_history(self, user_id: str) -> Dict[str, Any]:
+        """Load conversation history from Store and restore to agent."""
+        try:
+            provider = self.config.get("ai_provider", "openai")
+            store: Store = Store(
+                self.hass, 1, f"ai_agent_ha_chat_{provider}_{user_id}"
+            )
+            data = await store.async_load()
+            messages = data.get("messages", []) if data else []
+            self.conversation_history = self._messages_to_conversation(messages)
+            return {"success": True, "messages": messages}
+        except Exception as e:
+            _LOGGER.exception("Error loading chat history: %s", str(e))
+            return {"error": str(e), "messages": []}
+
+    def _messages_to_conversation(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Convert UI message format to conversation history format."""
+        result: List[Dict[str, Any]] = []
+        for msg in messages:
+            role = "user" if msg.get("type") == "user" else "assistant"
+            text = msg.get("text", "")
+            result.append({"role": role, "content": text})
+        return result
+
+    def _conversation_to_messages(
+        self, history: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Convert conversation history to UI message format (skip system role)."""
+        result: List[Dict[str, Any]] = []
+        for entry in history:
+            role = entry.get("role", "user")
+            if role == "system":
+                continue
+            content = entry.get("content", "")
+            result.append(
+                {
+                    "type": "user" if role == "user" else "assistant",
+                    "text": content,
+                }
+            )
+        return result
