@@ -54,23 +54,94 @@ class TestLocalClient:
         """Test LocalClient successful response."""
         try:
             from custom_components.ai_agent_ha.agent import LocalClient
-            
+
             client = LocalClient("http://localhost:11434/api/generate", "test-model")
-            
-            mock_response = {
-                "response": "Test response from local model",
-                "done": True
-            }
-            
+
             # Use a simpler approach - skip the async context manager test
             # and just test the initialization and basic functionality
             assert client.url == "http://localhost:11434/api/generate"
             assert client.model == "test-model"
-            
+
             # Since mocking aiohttp async context managers is complex,
             # we'll just verify the client is properly initialized
             # The actual HTTP functionality is tested in integration tests
-            
+
+        except ImportError:
+            pytest.skip("LocalClient not available")
+
+    @pytest.mark.asyncio
+    async def test_local_client_ollama_message_format(self):
+        """Test LocalClient handles Ollama /api/chat format (message with role+content)."""
+        try:
+            from custom_components.ai_agent_ha.agent import LocalClient
+
+            client = LocalClient("http://localhost:11434/api/chat", "qwen3:4b-instruct")
+
+            mock_response = json.dumps({
+                "model": "qwen3:4b-instruct",
+                "created_at": "2026-03-09T12:00:45.690644Z",
+                "message": {"role": "assistant", "content": "Hello from model!"},
+                "done": True,
+                "done_reason": "stop",
+            })
+
+            mock_resp = AsyncMock()
+            mock_resp.status = 200
+            mock_resp.text = AsyncMock(return_value=mock_response)
+
+            mock_session = AsyncMock()
+            mock_post = AsyncMock()
+            mock_post.__aenter__ = AsyncMock(return_value=mock_resp)
+            mock_post.__aexit__ = AsyncMock(return_value=None)
+            mock_session.post = Mock(return_value=mock_post)
+
+            with patch(
+                "custom_components.ai_agent_ha.agent.aiohttp.ClientSession",
+                return_value=mock_session,
+            ):
+                result = await client.get_response([{"role": "user", "content": "Hi"}])
+                parsed = json.loads(result)
+                assert parsed["request_type"] == "final_response"
+                assert parsed["response"] == "Hello from model!"
+
+        except ImportError:
+            pytest.skip("LocalClient not available")
+
+    @pytest.mark.asyncio
+    async def test_local_client_ollama_message_format_done_reason_load(self):
+        """Test LocalClient handles empty content with done_reason=load (model loading)."""
+        try:
+            from custom_components.ai_agent_ha.agent import LocalClient
+
+            client = LocalClient("http://localhost:11434/api/chat", "qwen3:4b-instruct")
+
+            mock_response = json.dumps({
+                "model": "qwen3:4b-instruct",
+                "created_at": "2026-03-09T12:00:45.690644Z",
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "done_reason": "load",
+            })
+
+            mock_resp = AsyncMock()
+            mock_resp.status = 200
+            mock_resp.text = AsyncMock(return_value=mock_response)
+
+            mock_session = AsyncMock()
+            mock_post = AsyncMock()
+            mock_post.__aenter__ = AsyncMock(return_value=mock_resp)
+            mock_post.__aexit__ = AsyncMock(return_value=None)
+            mock_session.post = Mock(return_value=mock_post)
+
+            with patch(
+                "custom_components.ai_agent_ha.agent.aiohttp.ClientSession",
+                return_value=mock_session,
+            ):
+                result = await client.get_response([{"role": "user", "content": "Hi"}])
+                parsed = json.loads(result)
+                assert parsed["request_type"] == "final_response"
+                assert "loading" in parsed["response"].lower()
+
         except ImportError:
             pytest.skip("LocalClient not available")
 

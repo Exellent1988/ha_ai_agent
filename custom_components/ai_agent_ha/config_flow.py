@@ -170,6 +170,18 @@ AVAILABLE_MODELS = {
 }
 
 
+def _ollama_base_url_from_local_url(local_url: str) -> str | None:
+    """Extract Ollama base URL from a local API URL (e.g. .../api/generate -> base)."""
+    if not local_url or not local_url.strip():
+        return None
+    url = local_url.strip().rstrip("/")
+    if "/api/" in url:
+        return url.split("/api/")[0]
+    if "/v1/" in url:
+        return url.split("/v1/")[0]
+    return url
+
+
 async def fetch_ollama_models(base_url: str) -> list[str]:
     """Fetch available models from Ollama /api/tags endpoint."""
     url = base_url.rstrip("/") + "/api/tags"
@@ -341,14 +353,23 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
 
         if provider == "local":
             # For local provider, we need both URL and optional model name
+            # Try to fetch models from default Ollama URL (localhost)
+            default_base = _ollama_base_url_from_local_url(
+                "http://localhost:11434/api/generate"
+            )
+            discovered = (
+                await fetch_ollama_models(default_base)
+                if default_base
+                else []
+            )
+            model_options = (
+                discovered + ["Custom..."] if discovered else AVAILABLE_MODELS["local"]
+            )
             schema_dict = {
                 vol.Required(CONF_LOCAL_URL): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
             }
-
-            # Add model selection
-            model_options = AVAILABLE_MODELS.get("local", ["Custom..."])
             schema_dict[vol.Optional("model", default="Custom...")] = SelectSelector(
                 SelectSelectorConfig(options=model_options)
             )
@@ -590,15 +611,18 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
         if provider == "local":
             # For local provider, we need both URL and optional model name
             current_url = self.config_entry.data.get(CONF_LOCAL_URL, "")
-
+            base_url = _ollama_base_url_from_local_url(current_url)
+            discovered = (
+                await fetch_ollama_models(base_url) if base_url else []
+            )
+            model_options = (
+                discovered + ["Custom..."] if discovered else AVAILABLE_MODELS["local"]
+            )
             schema_dict = {
                 vol.Required(CONF_LOCAL_URL, default=current_url): TextSelector(
                     TextSelectorConfig(type="text")
                 ),
             }
-
-            # Add model selection
-            model_options = AVAILABLE_MODELS.get("local", ["Custom..."])
             schema_dict[
                 vol.Optional(
                     "model", default=current_model if current_model else "Custom..."
