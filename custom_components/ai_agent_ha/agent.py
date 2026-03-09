@@ -40,7 +40,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_LANGUAGE, CONF_SYSTEM_PROMPT, CONF_WEATHER_ENTITY, DOMAIN
+from .const import (
+    CONF_LANGUAGE,
+    CONF_SYSTEM_PROMPT,
+    CONF_WEATHER_ENTITY,
+    DEFAULT_LANGUAGE,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1056,10 +1062,12 @@ class AiAgentHaAgent:
             "- create_automation(automation): Create a new automation with the provided configuration\n"
             "- create_dashboard(dashboard_config): Create a new dashboard with the provided configuration\n"
             "- update_dashboard(dashboard_url, dashboard_config): Update an existing dashboard configuration\n\n"
-            "IMPORTANT DEVICE_CLASS GUIDANCE:\n"
+            "IMPORTANT DEVICE_CLASS AND DOMAIN GUIDANCE:\n"
             "- Many sensors have a 'device_class' attribute (temperature, humidity, motion, etc.)\n"
+            "- For robot vacuums (Staubsaugerroboter, vacuum cleaners): use get_entities_by_domain('vacuum')\n"
             "- Use get_climate_related_entities() for climate dashboards (includes climate.* entities and temperature/humidity sensors)\n"
             "- Use get_entities_by_device_class(device_class) to filter by device_class (e.g., 'temperature', 'humidity', 'motion')\n"
+            "- When the user says entities are wrong or 'nicht meine Entitäten': REQUEST the correct entities with data_request. For vacuums use domain 'vacuum'. NEVER put a data_request inside final_response - always use data_request directly.\n"
             "- For climate dashboards, use history-graph and gauge cards for temperature/humidity sensors\n\n"
             "DASHBOARD CREATION:\n"
             "When a user asks to create a dashboard:\n"
@@ -1171,10 +1179,12 @@ class AiAgentHaAgent:
             "- create_automation(automation): Create a new automation with the provided configuration\n"
             "- create_dashboard(dashboard_config): Create a new dashboard with the provided configuration\n"
             "- update_dashboard(dashboard_url, dashboard_config): Update an existing dashboard configuration\n\n"
-            "IMPORTANT DEVICE_CLASS GUIDANCE:\n"
+            "IMPORTANT DEVICE_CLASS AND DOMAIN GUIDANCE:\n"
             "- Many sensors have a 'device_class' attribute (temperature, humidity, motion, etc.)\n"
+            "- For robot vacuums (Staubsaugerroboter, vacuum cleaners): use get_entities_by_domain('vacuum')\n"
             "- Use get_climate_related_entities() for climate dashboards (includes climate.* entities and temperature/humidity sensors)\n"
             "- Use get_entities_by_device_class(device_class) to filter by device_class (e.g., 'temperature', 'humidity', 'motion')\n"
+            "- When the user says entities are wrong or 'nicht meine Entitäten': REQUEST the correct entities with data_request. For vacuums use domain 'vacuum'. NEVER put a data_request inside final_response - always use data_request directly.\n"
             "- For climate dashboards, use history-graph and gauge cards for temperature/humidity sensors\n\n"
             "DASHBOARD CREATION:\n"
             "When a user asks to create a dashboard:\n"
@@ -1290,6 +1300,16 @@ class AiAgentHaAgent:
         self._language: Optional[str] = None
         self._settings_loaded = False
 
+        # Load system prompt and language from config (backend model configuration)
+        config_lang = config.get(CONF_LANGUAGE)
+        config_prompt = config.get(CONF_SYSTEM_PROMPT)
+        if config_lang is not None:
+            self._language = str(config_lang).strip() or DEFAULT_LANGUAGE
+        if config_prompt is not None:
+            prompt_str = str(config_prompt).strip()
+            self._custom_system_prompt = prompt_str if prompt_str else None
+        self._apply_system_prompt()
+
         # Initialize the appropriate AI client with model selection
         if provider == "openai":
             model = models_config.get("openai", "gpt-3.5-turbo")
@@ -1394,19 +1414,31 @@ class AiAgentHaAgent:
         self._cache[key] = (time.time(), data)
 
     async def _load_settings(self) -> None:
-        """Load custom system prompt and language from Store."""
+        """Load system prompt and language from config or Store (migration)."""
         if self._settings_loaded:
             return
-        provider = self.config.get("ai_provider", "openai")
-        store: Store = Store(self.hass, 1, f"ai_agent_ha_settings_{provider}")
-        try:
-            data = await store.async_load()
-            if data:
-                self._custom_system_prompt = data.get(CONF_SYSTEM_PROMPT)
-                self._language = data.get(CONF_LANGUAGE)
-                self._apply_system_prompt()
-        except Exception as e:
-            _LOGGER.debug("Could not load settings: %s", e)
+        # Config (from backend model configuration) takes precedence
+        config_lang = self.config.get(CONF_LANGUAGE)
+        config_prompt = self.config.get(CONF_SYSTEM_PROMPT)
+        if config_lang is not None or config_prompt is not None:
+            if config_lang is not None:
+                self._language = str(config_lang).strip() or DEFAULT_LANGUAGE
+            if config_prompt is not None:
+                prompt_str = str(config_prompt).strip()
+                self._custom_system_prompt = prompt_str if prompt_str else None
+            self._apply_system_prompt()
+        else:
+            # Migration: load from Store for old configs
+            provider = self.config.get("ai_provider", "openai")
+            store: Store = Store(self.hass, 1, f"ai_agent_ha_settings_{provider}")
+            try:
+                data = await store.async_load()
+                if data:
+                    self._custom_system_prompt = data.get(CONF_SYSTEM_PROMPT)
+                    self._language = data.get(CONF_LANGUAGE)
+                    self._apply_system_prompt()
+            except Exception as e:
+                _LOGGER.debug("Could not load settings from Store: %s", e)
         self._settings_loaded = True
 
     def _apply_system_prompt(self) -> None:
@@ -1422,6 +1454,70 @@ class AiAgentHaAgent:
             )
             base_content = lang_instruction + base_content
         self.system_prompt = {"role": "system", "content": base_content}
+
+    async def _execute_data_request(
+        self, request_type: str, parameters: Dict[str, Any]
+    ) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
+        """Execute a data request and return the result."""
+        try:
+            if request_type == "get_entity_state":
+                return await self.get_entity_state(parameters.get("entity_id"))
+            if request_type == "get_entities_by_domain":
+                return await self.get_entities_by_domain(parameters.get("domain"))
+            if request_type == "get_entities_by_area":
+                return await self.get_entities_by_area(
+                    parameters.get("area_id")
+                )
+            if request_type == "get_entities":
+                return await self.get_entities(
+                    area_id=parameters.get("area_id"),
+                    area_ids=parameters.get("area_ids"),
+                )
+            if request_type == "get_entities_by_device_class":
+                return await self.get_entities_by_device_class(
+                    parameters.get("device_class"),
+                    parameters.get("domain"),
+                )
+            if request_type == "get_climate_related_entities":
+                return await self.get_climate_related_entities()
+            if request_type == "get_calendar_events":
+                return await self.get_calendar_events(
+                    parameters.get("entity_id")
+                )
+            if request_type == "get_automations":
+                return await self.get_automations()
+            if request_type == "get_entity_registry":
+                return await self.get_entity_registry()
+            if request_type == "get_device_registry":
+                return await self.get_device_registry()
+            if request_type == "get_weather_data":
+                return await self.get_weather_data()
+            if request_type == "get_area_registry":
+                return await self.get_area_registry()
+            if request_type == "get_history":
+                return await self.get_history(
+                    parameters.get("entity_id"),
+                    parameters.get("hours", 24),
+                )
+            if request_type == "get_person_data":
+                return await self.get_person_data()
+            if request_type == "get_statistics":
+                return await self.get_statistics(
+                    parameters.get("entity_id")
+                )
+            if request_type == "get_scenes":
+                return await self.get_scenes()
+            if request_type == "get_dashboards":
+                return await self.get_dashboards()
+            if request_type == "get_dashboard_config":
+                return await self.get_dashboard_config(
+                    parameters.get("dashboard_url")
+                )
+            _LOGGER.warning("Unknown request type: %s", request_type)
+            return {"error": f"Unknown request type: {request_type}"}
+        except Exception as e:
+            _LOGGER.exception("Error executing data request: %s", str(e))
+            return {"error": str(e)}
 
     def _sanitize_automation_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize automation configuration to prevent injection attacks."""
@@ -3240,6 +3336,47 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                             continue
 
                         elif response_data.get("request_type") == "final_response":
+                            # Check if AI mistakenly put a data_request inside response (parse and process)
+                            response_text = response_data.get("response", "")
+                            nested_processed = False
+                            if (
+                                response_text
+                                and response_text.strip().startswith("{")
+                                and "request_type" in response_text
+                            ):
+                                try:
+                                    nested = json.loads(response_text)
+                                    if nested.get("request_type") == "data_request":
+                                        _LOGGER.debug(
+                                            "Extracting nested data_request from final_response"
+                                        )
+                                        request_type = nested.get("request")
+                                        parameters = nested.get("parameters", {})
+                                        self.conversation_history.append(
+                                            {
+                                                "role": "assistant",
+                                                "content": json.dumps(nested),
+                                            }
+                                        )
+                                        data = await self._execute_data_request(
+                                            request_type, parameters
+                                        )
+                                        self.conversation_history.append(
+                                            {
+                                                "role": "user",
+                                                "content": json.dumps(
+                                                    {"data": data}, default=str
+                                                ),
+                                            }
+                                        )
+                                        nested_processed = True
+                                        continue
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+
+                            if nested_processed:
+                                continue
+
                             # Add final response to conversation history
                             self.conversation_history.append(
                                 {
@@ -3964,18 +4101,13 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
     async def save_system_prompt_settings(
         self, system_prompt: Optional[str] = None, language: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Save custom system prompt and/or language to Store."""
+        """Save system prompt and/or language (updates agent state; config entry updated by service handler)."""
         try:
-            provider = self.config.get("ai_provider", "openai")
-            store: Store = Store(self.hass, 1, f"ai_agent_ha_settings_{provider}")
-            data = await store.async_load() or {}
             if system_prompt is not None:
-                data[CONF_SYSTEM_PROMPT] = system_prompt
+                prompt_str = str(system_prompt).strip()
+                self._custom_system_prompt = prompt_str if prompt_str else None
             if language is not None:
-                data[CONF_LANGUAGE] = language
-            await store.async_save(data)
-            self._custom_system_prompt = data.get(CONF_SYSTEM_PROMPT)
-            self._language = data.get(CONF_LANGUAGE)
+                self._language = str(language).strip() or DEFAULT_LANGUAGE
             self._apply_system_prompt()
             return {"success": True}
         except Exception as e:

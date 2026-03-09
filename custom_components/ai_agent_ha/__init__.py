@@ -14,7 +14,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .agent import AiAgentHaAgent
-from .const import DOMAIN
+from .const import CONF_LANGUAGE, CONF_SYSTEM_PROMPT, DEFAULT_LANGUAGE, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,15 +39,15 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Migrating config entry from version %s", entry.version)
 
     if entry.version == 1:
-        # No migration needed for version 1
+        # Add system_prompt and language to config if missing (from Store migration)
+        new_data = dict(entry.data)
+        if CONF_LANGUAGE not in new_data:
+            new_data[CONF_LANGUAGE] = DEFAULT_LANGUAGE
+        if CONF_SYSTEM_PROMPT not in new_data:
+            new_data[CONF_SYSTEM_PROMPT] = ""
+        if new_data != entry.data:
+            hass.config_entries.async_update_entry(entry, data=new_data)
         return True
-
-    # Future migrations would go here
-    # if entry.version < 2:
-    #     # Migrate from version 1 to 2
-    #     new_data = dict(entry.data)
-    #     # Add migration logic here
-    #     hass.config_entries.async_update_entry(entry, data=new_data, version=2)
 
     _LOGGER.info("Migration to version %s successful", entry.version)
     return True
@@ -266,10 +266,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return {"error": "No AI agents configured"}
                 provider = available_providers[0]
 
+            system_prompt = call.data.get("system_prompt")
+            language = call.data.get("language")
+
+            # Update config entry for persistence
+            entries = hass.config_entries.async_entries(DOMAIN)
+            for entry in entries:
+                if entry.data.get("ai_provider") == provider:
+                    new_data = dict(entry.data)
+                    new_data[CONF_LANGUAGE] = (
+                        (language or "").strip() or DEFAULT_LANGUAGE
+                    )
+                    new_data[CONF_SYSTEM_PROMPT] = (system_prompt or "").strip()
+                    hass.config_entries.async_update_entry(entry, data=new_data)
+                    if "configs" in hass.data[DOMAIN]:
+                        hass.data[DOMAIN]["configs"][provider] = new_data
+                    break
+
             agent = hass.data[DOMAIN]["agents"][provider]
             result = await agent.save_system_prompt_settings(
-                system_prompt=call.data.get("system_prompt"),
-                language=call.data.get("language"),
+                system_prompt=system_prompt,
+                language=language,
             )
             return result
         except Exception as e:

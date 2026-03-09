@@ -38,9 +38,6 @@ class AiAgentHaPanel extends LitElement {
       _showThinking: { type: Boolean, reflect: false, attribute: false },
       _thinkingExpanded: { type: Boolean, reflect: false, attribute: false },
       _debugInfo: { type: Object, reflect: false, attribute: false },
-      _showSettingsDialog: { type: Boolean, reflect: false, attribute: false },
-      _systemPrompt: { type: String, reflect: false, attribute: false },
-      _language: { type: String, reflect: false, attribute: false },
       _lastDebugInfo: { type: Object, reflect: false, attribute: false }
     };
   }
@@ -637,30 +634,6 @@ class AiAgentHaPanel extends LitElement {
         --mdc-dialog-min-width: 500px;
         --mdc-dialog-max-width: 90vw;
       }
-      .settings-dialog-content {
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-      }
-      .settings-dialog-content label {
-        font-weight: 500;
-        margin-bottom: 4px;
-      }
-      .settings-dialog-content textarea {
-        width: 100%;
-        min-height: 200px;
-        padding: 12px;
-        border: 1px solid var(--divider-color);
-        border-radius: 8px;
-        font-family: monospace;
-        font-size: 12px;
-      }
-      .settings-dialog-content input {
-        width: 100%;
-        padding: 12px;
-        border: 1px solid var(--divider-color);
-        border-radius: 8px;
-      }
     `;
   }
 
@@ -697,9 +670,6 @@ class AiAgentHaPanel extends LitElement {
     this._showThinking = false;
     this._thinkingExpanded = false;
     this._debugInfo = null;
-    this._showSettingsDialog = false;
-    this._systemPrompt = '';
-    this._language = '';
     this._lastDebugInfo = null;
     this._chatHistoryLoaded = false;
     console.debug("AI Agent HA Panel constructor called");
@@ -1023,9 +993,6 @@ class AiAgentHaPanel extends LitElement {
           <button class="icon-button" @click=${this._exportChat} title="Chat exportieren">
             <ha-icon icon="mdi:download"></ha-icon>
           </button>
-          <button class="icon-button" @click=${this._openSettings} title="Einstellungen">
-            <ha-icon icon="mdi:cog"></ha-icon>
-          </button>
           <button
             class="clear-button"
             @click=${this._clearChat}
@@ -1036,7 +1003,6 @@ class AiAgentHaPanel extends LitElement {
           </button>
         </div>
       </div>
-      ${this._showSettingsDialog ? this._renderSettingsDialog() : ''}
       <div class="content">
         <div class="chat-container">
           <div class="messages" id="messages">
@@ -1468,9 +1434,6 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_availableProviders') ||
            changedProps.has('_selectedProvider') ||
            changedProps.has('_showProviderDropdown') ||
-           changedProps.has('_showSettingsDialog') ||
-           changedProps.has('_systemPrompt') ||
-           changedProps.has('_language') ||
            changedProps.has('_debugInfo') ||
            changedProps.has('_showThinking');
   }
@@ -1508,43 +1471,6 @@ class AiAgentHaPanel extends LitElement {
     }
   }
 
-  _openSettings() {
-    this._showSettingsDialog = true;
-    this._loadSystemPromptSettings();
-    this.requestUpdate();
-  }
-
-  async _loadSystemPromptSettings() {
-    if (!this.hass || !this._selectedProvider) return;
-    try {
-      const result = await this.hass.callService('ai_agent_ha', 'load_system_prompt_settings', {
-        provider: this._selectedProvider
-      });
-      if (result && !result.error) {
-        this._systemPrompt = result.system_prompt || '';
-        this._language = result.language || '';
-      }
-    } catch (e) {
-      console.debug('Could not load system prompt settings:', e);
-    }
-    this.requestUpdate();
-  }
-
-  async _saveSystemPromptSettings() {
-    if (!this.hass || !this._selectedProvider) return;
-    try {
-      await this.hass.callService('ai_agent_ha', 'save_system_prompt_settings', {
-        provider: this._selectedProvider,
-        system_prompt: this._systemPrompt,
-        language: this._language
-      });
-      this._showSettingsDialog = false;
-      this.requestUpdate();
-    } catch (e) {
-      console.error('Could not save system prompt settings:', e);
-    }
-  }
-
   _exportChat() {
     const exportData = {
       exportedAt: new Date().toISOString(),
@@ -1559,42 +1485,6 @@ class AiAgentHaPanel extends LitElement {
     a.download = `ai_agent_ha_chat_${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }
-
-  _renderSettingsDialog() {
-    return html`
-      <ha-dialog
-        open
-        .heading=${'Einstellungen'}
-        @closed=${() => { this._showSettingsDialog = false; this.requestUpdate(); }}
-      >
-        <div class="settings-dialog-content">
-          <div>
-            <label>Sprache (z.B. Deutsch, English)</label>
-            <input
-              type="text"
-              .value=${this._language}
-              @input=${e => this._language = e.target.value}
-              placeholder="Leer = Standard"
-            />
-          </div>
-          <div>
-            <label>System-Prompt (leer = Standard)</label>
-            <textarea
-              .value=${this._systemPrompt}
-              @input=${e => this._systemPrompt = e.target.value}
-              placeholder="Eigener System-Prompt - leer lassen für Standard"
-            ></textarea>
-          </div>
-        </div>
-        <ha-button slot="primaryAction" @click=${() => this._saveSystemPromptSettings()}>
-          Speichern
-        </ha-button>
-        <ha-button slot="secondaryAction" dialogAction="cancel">
-          Abbrechen
-        </ha-button>
-      </ha-dialog>
-    `;
   }
 
   _resolveProviderFromEntry(entry) {

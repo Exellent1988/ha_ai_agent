@@ -34,5 +34,8 @@ CONF_MODELS = "models"
 CONF_SYSTEM_PROMPT = "system_prompt"
 CONF_LANGUAGE = "language"
 
+# Default values for model configuration
+DEFAULT_LANGUAGE = "Deutsch"
+
 # Supported AI providers
 DEFAULT_AI_PROVIDER = "openai"
