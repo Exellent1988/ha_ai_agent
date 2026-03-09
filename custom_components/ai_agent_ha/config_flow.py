@@ -17,7 +17,15 @@ from homeassistant.helpers.selector import (
 
 import aiohttp
 
-from .const import CONF_LOCAL_MODEL, CONF_LOCAL_URL, CONF_OLLAMA_URL, DOMAIN
+from .const import (
+    CONF_LANGUAGE,
+    CONF_LOCAL_MODEL,
+    CONF_LOCAL_URL,
+    CONF_OLLAMA_URL,
+    CONF_SYSTEM_PROMPT,
+    DEFAULT_LANGUAGE,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -202,6 +210,26 @@ async def fetch_ollama_models(base_url: str) -> list[str]:
 DEFAULT_PROVIDER = "openai"
 
 
+def _add_system_prompt_fields(
+    schema_dict: dict,
+    default_lang: str = DEFAULT_LANGUAGE,
+    default_prompt: str = "",
+) -> None:
+    """Add optional system prompt and language fields to schema."""
+    schema_dict[vol.Optional(CONF_LANGUAGE, default=default_lang)] = TextSelector(
+        TextSelectorConfig(type="text")
+    )
+    schema_dict[vol.Optional(CONF_SYSTEM_PROMPT, default=default_prompt)] = TextSelector(
+        TextSelectorConfig(type="text", multiline=True)
+    )
+
+
+def _store_system_prompt_from_input(config_data: dict, user_input: dict) -> None:
+    """Store system prompt and language from user input into config_data."""
+    config_data[CONF_LANGUAGE] = user_input.get(CONF_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
+    config_data[CONF_SYSTEM_PROMPT] = user_input.get(CONF_SYSTEM_PROMPT, "") or ""
+
+
 class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg,misc]
     """Handle a config flow for AI Agent HA."""
 
@@ -308,6 +336,9 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                             # Fallback to default model for other providers
                             self.config_data["models"][provider] = default_model
 
+                    _store_system_prompt_from_input(
+                        self.config_data, user_input
+                    )
                     return self.async_create_entry(
                         title=f"AI Agent HA ({PROVIDERS[provider]})",
                         data=self.config_data,
@@ -340,6 +371,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     TextSelectorConfig(type="text")
                 ),
             }
+            _add_system_prompt_fields(schema_dict)
 
             return self.async_show_form(
                 step_id="configure",
@@ -376,6 +408,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+            _add_system_prompt_fields(schema_dict)
 
             return self.async_show_form(
                 step_id="configure",
@@ -405,6 +438,7 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+            _add_system_prompt_fields(schema_dict)
 
             return self.async_show_form(
                 step_id="configure",
@@ -436,6 +470,8 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+
+        _add_system_prompt_fields(schema_dict)
 
         return self.async_show_form(
             step_id="configure",
@@ -562,6 +598,14 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         f"Options flow - Final model config for {provider}: {updated_data['models'].get(provider)}"
                     )
 
+                    # Store system prompt and language from config
+                    updated_data[CONF_LANGUAGE] = user_input.get(
+                        CONF_LANGUAGE, DEFAULT_LANGUAGE
+                    ) or DEFAULT_LANGUAGE
+                    updated_data[CONF_SYSTEM_PROMPT] = (
+                        user_input.get(CONF_SYSTEM_PROMPT, "") or ""
+                    )
+
                     # Update the config entry
                     self.hass.config_entries.async_update_entry(
                         self.config_entry, data=updated_data
@@ -597,6 +641,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                     TextSelectorConfig(type="text")
                 ),
             }
+            _add_system_prompt_fields(
+                schema_dict,
+                default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
+                default_prompt=self.config_entry.data.get(CONF_SYSTEM_PROMPT, ""),
+            )
 
             return self.async_show_form(
                 step_id="configure_options",
@@ -631,6 +680,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+            _add_system_prompt_fields(
+                schema_dict,
+                default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
+                default_prompt=self.config_entry.data.get(CONF_SYSTEM_PROMPT, ""),
+            )
 
             return self.async_show_form(
                 step_id="configure_options",
@@ -661,6 +715,11 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             ] = SelectSelector(SelectSelectorConfig(options=model_options))
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
+            )
+            _add_system_prompt_fields(
+                schema_dict,
+                default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
+                default_prompt=self.config_entry.data.get(CONF_SYSTEM_PROMPT, ""),
             )
 
             return self.async_show_form(
@@ -693,6 +752,12 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict[vol.Optional("custom_model")] = TextSelector(
                 TextSelectorConfig(type="text")
             )
+
+        _add_system_prompt_fields(
+            schema_dict,
+            default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
+            default_prompt=self.config_entry.data.get(CONF_SYSTEM_PROMPT, ""),
+        )
 
         return self.async_show_form(
             step_id="configure_options",
