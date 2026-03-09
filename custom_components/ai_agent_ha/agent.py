@@ -452,6 +452,54 @@ class LocalClient(BaseAIClient):
                             }
                             return json.dumps(wrapped_response)
 
+                        # Ollama /api/chat format: message with role + content
+                        elif "message" in data:
+                            message_content = data["message"]
+                            if (
+                                isinstance(message_content, dict)
+                                and "content" in message_content
+                            ):
+                                content = message_content["content"] or ""
+                            else:
+                                content = str(message_content) if message_content else ""
+
+                            if not content or not content.strip():
+                                if data.get("done_reason") == "load":
+                                    return json.dumps(
+                                        {
+                                            "request_type": "final_response",
+                                            "response": "The AI model is still loading. Please wait a moment and try again.",
+                                        }
+                                    )
+                                if data.get("done") is False:
+                                    return json.dumps(
+                                        {
+                                            "request_type": "final_response",
+                                            "response": "The AI is still processing your request. Please try again.",
+                                        }
+                                    )
+                                return json.dumps(
+                                    {
+                                        "request_type": "final_response",
+                                        "response": "The AI returned an empty response. Please try rephrasing your question.",
+                                    }
+                                )
+
+                            content = content.strip()
+                            if content.startswith("{") and content.endswith("}"):
+                                try:
+                                    parsed_json = json.loads(content)
+                                    if (
+                                        isinstance(parsed_json, dict)
+                                        and "request_type" in parsed_json
+                                    ):
+                                        return content
+                                except json.JSONDecodeError:
+                                    pass
+                            return json.dumps(
+                                {"request_type": "final_response", "response": content}
+                            )
+
                         # Handle case where no standard fields are found
                         _LOGGER.warning(
                             "No standard response fields found in local API response. Full response: %s",
@@ -466,25 +514,12 @@ class LocalClient(BaseAIClient):
                                     "response": "The AI model is still loading. Please wait a moment and try again.",
                                 }
                             )
-                        elif data.get("done") is False:
+                        if data.get("done") is False:
                             return json.dumps(
                                 {
                                     "request_type": "final_response",
                                     "response": "The AI is still processing your request. Please try again.",
                                 }
-                            )
-                        elif "message" in data:
-                            # Some APIs use "message" field
-                            message_content = data["message"]
-                            if (
-                                isinstance(message_content, dict)
-                                and "content" in message_content
-                            ):
-                                content = message_content["content"]
-                            else:
-                                content = str(message_content)
-                            return json.dumps(
-                                {"request_type": "final_response", "response": content}
                             )
 
                         # Return the whole data as string if we can't find a specific field
