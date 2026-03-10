@@ -38,9 +38,74 @@ def _ensure_list(value: Any) -> List[Any]:
     return []
 
 
+def _fix_conditions(conditions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fix AI-generated condition quirks that HA doesn't accept.
+
+    - ``negate: true`` → wrap in ``condition: not`` with nested ``conditions``.
+    - Removes unknown keys that HA schema rejects.
+    """
+    fixed: List[Dict[str, Any]] = []
+    for cond in conditions:
+        if not isinstance(cond, dict):
+            fixed.append(cond)
+            continue
+        cond = dict(cond)
+        negate = cond.pop("negate", None)
+        if negate:
+            fixed.append({
+                "condition": "not",
+                "conditions": [cond],
+            })
+        else:
+            fixed.append(cond)
+    return fixed
+
+
+def _fix_triggers(triggers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Normalize AI-generated triggers for HA compatibility.
+
+    - Renames ``type`` → ``platform`` when ``platform`` is missing (common AI mistake).
+    - Ensures ``for`` durations are strings (e.g. ``"00:15:00"``) not dicts.
+    """
+    fixed: List[Dict[str, Any]] = []
+    for trig in triggers:
+        if not isinstance(trig, dict):
+            fixed.append(trig)
+            continue
+        trig = dict(trig)
+        if "platform" not in trig and "type" in trig:
+            trig["platform"] = trig.pop("type")
+        dur = trig.get("for")
+        if isinstance(dur, dict):
+            h = int(dur.get("hours", 0))
+            m = int(dur.get("minutes", 0))
+            s = int(dur.get("seconds", 0))
+            trig["for"] = f"{h:02d}:{m:02d}:{s:02d}"
+        fixed.append(trig)
+    return fixed
+
+
+def _fix_actions(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Normalize AI-generated actions for HA compatibility.
+
+    - Renames ``service`` → ``action`` (HA 2024.x+ renamed service calls to actions).
+    """
+    fixed: List[Dict[str, Any]] = []
+    for act in actions:
+        if not isinstance(act, dict):
+            fixed.append(act)
+            continue
+        act = dict(act)
+        if "service" in act and "action" not in act:
+            act["action"] = act.pop("service")
+        fixed.append(act)
+    return fixed
+
+
 def sanitize_automation_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Sanitize automation configuration to prevent injection attacks.
     Normalizes trigger/condition/action to lists (HA format; AI may return single objects).
+    Fixes common AI-generated schema issues (negate, service→action, type→platform).
     """
     sanitized: Dict[str, Any] = {}
     for key, value in config.items():
@@ -53,6 +118,14 @@ def sanitize_automation_config(config: Dict[str, Any]) -> Dict[str, Any]:
         elif key == "mode":
             if value in ["single", "restart", "queued", "parallel"]:
                 sanitized[key] = value
+
+    if "trigger" in sanitized:
+        sanitized["trigger"] = _fix_triggers(sanitized["trigger"])
+    if "condition" in sanitized:
+        sanitized["condition"] = _fix_conditions(sanitized["condition"])
+    if "action" in sanitized:
+        sanitized["action"] = _fix_actions(sanitized["action"])
+
     return sanitized
 
 
@@ -113,17 +186,28 @@ async def create_automation(
             auto.get("alias") == automation_entry["alias"]
             for auto in current_automations
         ):
+            _LOGGER.warning(
+                "Automation '%s' already exists, skipping creation",
+                automation_entry["alias"],
+            )
             return {
                 "error": f"An automation with the name '{automation_entry['alias']}' already exists"
             }
 
         current_automations.append(automation_entry)
+        _LOGGER.info(
+            "Writing %d automations to %s (adding '%s')",
+            len(current_automations),
+            automations_path,
+            automation_entry["alias"],
+        )
 
         def _write_automations() -> None:
             with open(automations_path, "w", encoding="utf-8") as f:
                 yaml.dump(current_automations, f, default_flow_style=False)
 
         await hass.async_add_executor_job(_write_automations)
+        _LOGGER.info("automations.yaml written successfully")
 
         try:
             await hass.services.async_call("automation", "reload")
@@ -165,6 +249,11 @@ async def create_automation(
                 ),
             }
 
+        _LOGGER.info(
+            "Automation '%s' (%s) created successfully",
+            automation_entry["alias"],
+            entity_id,
+        )
         return {
             "success": True,
             "message": f"Automation '{automation_entry['alias']}' created successfully",

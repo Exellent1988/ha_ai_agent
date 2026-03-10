@@ -1540,6 +1540,7 @@ class AiAgentHaPanel extends LitElement {
         { type: 'assistant', text: `Error: ${this._error}` }
       ];
     }
+      this._saveChatHistory();
     } catch (error) {
       console.error("Error in _handleLlamaResponse:", error);
       this._clearLoadingState();
@@ -1558,18 +1559,31 @@ class AiAgentHaPanel extends LitElement {
     try {
       const items = Array.isArray(automation) ? automation : [automation];
 
+      let unsubFn = null;
       const resultPromise = new Promise((resolve) => {
-        const unsub = this.hass.connection.subscribeEvents((ev) => {
-          unsub.then(u => u());
-          resolve(ev.data);
-        }, 'ai_agent_ha_automation_result');
-        setTimeout(() => { resolve(null); }, 30000);
+        let resolved = false;
+        const timer = setTimeout(() => {
+          if (!resolved) { resolved = true; resolve(null); }
+          if (unsubFn) { unsubFn(); unsubFn = null; }
+        }, 30000);
+
+        this.hass.connection.subscribeEvents((ev) => {
+          if (!resolved) { resolved = true; clearTimeout(timer); resolve(ev.data); }
+          if (unsubFn) { unsubFn(); unsubFn = null; }
+        }, 'ai_agent_ha_automation_result').then(unsub => {
+          unsubFn = unsub;
+          if (resolved && unsubFn) { unsubFn(); unsubFn = null; }
+        });
       });
 
+      await new Promise(r => setTimeout(r, 100));
+
+      dbg("Calling create_automation service with items:", items);
       await this.hass.callService('ai_agent_ha', 'create_automation', {
         automation: items.length === 1 ? items[0] : items,
         provider: this._selectedProvider || undefined
       });
+      dbg("create_automation service call completed, waiting for event...");
 
       const result = await resultPromise;
       dbg("Automation creation result event:", result);
@@ -1590,9 +1604,10 @@ class AiAgentHaPanel extends LitElement {
           this._error = fail.map(r => r.error).join('; ');
         }
       } else {
-        text = items.map(a => `Automation "${a.alias}" wurde erstellt.`).join('\n');
+        text = items.map(a => `Automation "${a.alias}" wurde erstellt (Timeout bei Rückmeldung).`).join('\n');
       }
       this._messages = [...this._messages, { type: 'assistant', text }];
+      this._saveChatHistory();
     } catch (error) {
       console.error("Error creating automation:", error);
       this._error = error.message || 'An error occurred while creating the automation';
@@ -1694,9 +1709,31 @@ class AiAgentHaPanel extends LitElement {
   async _loadChatHistory() {
     if (!this.hass || !this._selectedProvider) return;
     try {
-      const result = await this.hass.callService('ai_agent_ha', 'load_chat_history', {
+      let unsubFn = null;
+      const resultPromise = new Promise((resolve) => {
+        let resolved = false;
+        const timer = setTimeout(() => {
+          if (!resolved) { resolved = true; resolve(null); }
+          if (unsubFn) { unsubFn(); unsubFn = null; }
+        }, 10000);
+
+        this.hass.connection.subscribeEvents((ev) => {
+          if (!resolved) { resolved = true; clearTimeout(timer); resolve(ev.data); }
+          if (unsubFn) { unsubFn(); unsubFn = null; }
+        }, 'ai_agent_ha_chat_history').then(unsub => {
+          unsubFn = unsub;
+          if (resolved && unsubFn) { unsubFn(); unsubFn = null; }
+        });
+      });
+
+      await new Promise(r => setTimeout(r, 50));
+
+      await this.hass.callService('ai_agent_ha', 'load_chat_history', {
         provider: this._selectedProvider
       });
+
+      const result = await resultPromise;
+      dbg('load_chat_history result:', result);
       if (result && result.messages && result.messages.length > 0) {
         this._messages = result.messages;
         this._chatHistoryLoaded = true;
@@ -1704,6 +1741,19 @@ class AiAgentHaPanel extends LitElement {
       }
     } catch (e) {
       dbg('Could not load chat history:', e);
+    }
+  }
+
+  async _saveChatHistory() {
+    if (!this.hass || !this._selectedProvider) return;
+    try {
+      await this.hass.callService('ai_agent_ha', 'save_chat_history', {
+        provider: this._selectedProvider,
+        messages: this._messages
+      });
+      dbg('Chat history saved, messages:', this._messages.length);
+    } catch (e) {
+      dbg('Could not save chat history:', e);
     }
   }
 

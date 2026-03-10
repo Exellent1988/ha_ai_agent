@@ -423,43 +423,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Handle the save_chat_history service call."""
         try:
             if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
-                return {"error": "No AI agents configured"}
+                _LOGGER.warning("save_chat_history: No AI agents configured")
+                return
 
             entry_id = call.data.get("provider")
             if entry_id not in hass.data[DOMAIN]["agents"]:
                 available = list(hass.data[DOMAIN]["agents"].keys())
                 if not available:
-                    return {"error": "No AI agents configured"}
+                    return
                 entry_id = available[0]
 
             agent = hass.data[DOMAIN]["agents"][entry_id]
             user_id = call.context.user_id if call.context.user_id else "default"
-            return await agent.save_chat_history(
+            await agent.save_chat_history(
                 user_id, call.data.get("messages", [])
             )
+            _LOGGER.debug("Chat history saved for user %s, provider %s", user_id, entry_id)
         except Exception as e:
-            _LOGGER.error(f"Error saving chat history: {e}")
-            return {"error": str(e)}
+            _LOGGER.error("Error saving chat history: %s", e, exc_info=True)
 
     async def async_handle_load_chat_history(call):
         """Handle the load_chat_history service call."""
         try:
             if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
-                return {"error": "No AI agents configured", "messages": []}
+                hass.bus.async_fire("ai_agent_ha_chat_history", {"messages": []})
+                return
 
             entry_id = call.data.get("provider")
             if entry_id not in hass.data[DOMAIN]["agents"]:
                 available = list(hass.data[DOMAIN]["agents"].keys())
                 if not available:
-                    return {"error": "No AI agents configured", "messages": []}
+                    hass.bus.async_fire("ai_agent_ha_chat_history", {"messages": []})
+                    return
                 entry_id = available[0]
 
             agent = hass.data[DOMAIN]["agents"][entry_id]
             user_id = call.context.user_id if call.context.user_id else "default"
-            return await agent.load_chat_history(user_id)
+            result = await agent.load_chat_history(user_id)
+            messages = result.get("messages", []) if isinstance(result, dict) else []
+            _LOGGER.debug(
+                "Chat history loaded for user %s, provider %s: %d messages",
+                user_id, entry_id, len(messages),
+            )
+            hass.bus.async_fire("ai_agent_ha_chat_history", {"messages": messages})
         except Exception as e:
-            _LOGGER.error(f"Error loading chat history: {e}")
-            return {"error": str(e), "messages": []}
+            _LOGGER.error("Error loading chat history: %s", e, exc_info=True)
+            hass.bus.async_fire("ai_agent_ha_chat_history", {"messages": [], "error": str(e)})
 
     async def async_handle_get_configured_providers(call):
         """Return list of configured providers for the frontend (value + label from entry title)."""
