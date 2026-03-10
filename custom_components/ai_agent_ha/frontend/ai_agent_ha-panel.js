@@ -1557,29 +1557,40 @@ class AiAgentHaPanel extends LitElement {
     this._isLoading = true;
     try {
       const items = Array.isArray(automation) ? automation : [automation];
-      const results = [];
-      for (const item of items) {
-        try {
-          await this.hass.callService('ai_agent_ha', 'create_automation', {
-            automation: item,
-            provider: this._selectedProvider || undefined
-          });
-          results.push({ alias: item.alias, ok: true });
-        } catch (err) {
-          console.error("Error creating automation:", item.alias, err);
-          results.push({ alias: item.alias, ok: false, error: err.message || String(err) });
-        }
-      }
-      const succeeded = results.filter(r => r.ok);
-      const failed = results.filter(r => !r.ok);
+
+      const resultPromise = new Promise((resolve) => {
+        const unsub = this.hass.connection.subscribeEvents((ev) => {
+          unsub.then(u => u());
+          resolve(ev.data);
+        }, 'ai_agent_ha_automation_result');
+        setTimeout(() => { resolve(null); }, 30000);
+      });
+
+      await this.hass.callService('ai_agent_ha', 'create_automation', {
+        automation: items.length === 1 ? items[0] : items,
+        provider: this._selectedProvider || undefined
+      });
+
+      const result = await resultPromise;
+      dbg("Automation creation result event:", result);
+
       let text = '';
-      if (succeeded.length > 0) {
-        text += succeeded.map(r => `Automation "${r.alias}" wurde erfolgreich erstellt!`).join('\n');
-      }
-      if (failed.length > 0) {
-        if (text) text += '\n';
-        text += failed.map(r => `Fehler bei "${r.alias}": ${r.error}`).join('\n');
-        this._error = failed.map(r => r.error).join('; ');
+      if (result && result.error) {
+        text = `Fehler: ${result.error}`;
+        this._error = result.error;
+      } else if (result) {
+        const ok = result.succeeded || [];
+        const fail = result.failed || [];
+        if (ok.length > 0) {
+          text += ok.map(r => `Automation "${r.alias}" wurde erfolgreich erstellt!`).join('\n');
+        }
+        if (fail.length > 0) {
+          if (text) text += '\n';
+          text += fail.map(r => `Fehler bei "${r.alias}": ${r.error}`).join('\n');
+          this._error = fail.map(r => r.error).join('; ');
+        }
+      } else {
+        text = items.map(a => `Automation "${a.alias}" wurde erstellt.`).join('\n');
       }
       this._messages = [...this._messages, { type: 'assistant', text }];
     } catch (error) {

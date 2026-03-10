@@ -71,13 +71,17 @@ async def create_automation(
         if not all(
             key in automation_config for key in ["alias", "trigger", "action"]
         ):
+            _LOGGER.error("Missing required fields: %s", list(automation_config.keys()))
             return {"error": "Missing required fields in automation configuration"}
 
         sanitized_config = sanitize_automation_config(automation_config)
+        _LOGGER.debug("Sanitized config keys: %s", list(sanitized_config.keys()))
 
         if "trigger" not in sanitized_config or not sanitized_config["trigger"]:
+            _LOGGER.error("No trigger after sanitization (raw type: %s)", type(automation_config.get("trigger")))
             return {"error": "Automation must have at least one trigger"}
         if "action" not in sanitized_config or not sanitized_config["action"]:
+            _LOGGER.error("No action after sanitization (raw type: %s)", type(automation_config.get("action")))
             return {"error": "Automation must have at least one action"}
 
         automation_id = f"ai_agent_auto_{int(time.time() * 1000)}"

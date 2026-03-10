@@ -235,44 +235,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def async_handle_create_automation(call):
         """Handle the create_automation service call."""
         try:
-            # Check if agents are available
             if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
-                _LOGGER.error(
-                    "No AI agents available. Please configure the integration first."
-                )
-                return {"error": "No AI agents configured"}
+                _LOGGER.error("No AI agents available.")
+                hass.bus.async_fire("ai_agent_ha_automation_result", {"error": "No AI agents configured"})
+                return
 
             entry_id = call.data.get("provider")
             if entry_id not in hass.data[DOMAIN]["agents"]:
                 available = list(hass.data[DOMAIN]["agents"].keys())
                 if not available:
                     _LOGGER.error("No AI agents available")
-                    return {"error": "No AI agents configured"}
+                    hass.bus.async_fire("ai_agent_ha_automation_result", {"error": "No AI agents configured"})
+                    return
                 entry_id = available[0]
                 _LOGGER.debug("Using fallback entry: %s", entry_id)
 
             agent = hass.data[DOMAIN]["agents"][entry_id]
             automation_data = call.data.get("automation", {})
-            if isinstance(automation_data, list):
-                results = []
-                for item in automation_data:
-                    r = await agent.create_automation(item)
-                    results.append(r)
-                errors = [r for r in results if r.get("error")]
-                if errors:
-                    return {
-                        "error": "; ".join(e["error"] for e in errors),
-                        "message": "; ".join(e.get("message", e["error"]) for e in errors),
-                    }
-                msgs = [r.get("message", "") for r in results if r.get("message")]
-                return {"success": True, "message": " | ".join(msgs)}
-            result = await agent.create_automation(automation_data)
-            if result.get("error") and result.get("message"):
-                return {"error": result["error"], "message": result["message"]}
-            return result
+            items = automation_data if isinstance(automation_data, list) else [automation_data]
+            succeeded = []
+            failed = []
+            for item in items:
+                r = await agent.create_automation(item)
+                _LOGGER.debug("create_automation result for '%s': %s", item.get("alias", "?"), r)
+                if r.get("error"):
+                    failed.append({"alias": item.get("alias", "?"), "error": r["error"]})
+                else:
+                    succeeded.append({"alias": item.get("alias", "?"), "message": r.get("message", "OK")})
+            hass.bus.async_fire("ai_agent_ha_automation_result", {
+                "succeeded": succeeded,
+                "failed": failed,
+            })
         except Exception as e:
-            _LOGGER.error(f"Error creating automation: {e}")
-            return {"error": str(e), "message": str(e)}
+            _LOGGER.error("Error creating automation: %s", e, exc_info=True)
+            hass.bus.async_fire("ai_agent_ha_automation_result", {"error": str(e)})
 
     async def async_handle_update_automation(call):
         """Handle the update_automation service call."""
