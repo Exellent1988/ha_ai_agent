@@ -252,7 +252,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug("Using fallback entry: %s", entry_id)
 
             agent = hass.data[DOMAIN]["agents"][entry_id]
-            result = await agent.create_automation(call.data.get("automation", {}))
+            automation_data = call.data.get("automation", {})
+            if isinstance(automation_data, list):
+                results = []
+                for item in automation_data:
+                    r = await agent.create_automation(item)
+                    results.append(r)
+                errors = [r for r in results if r.get("error")]
+                if errors:
+                    return {
+                        "error": "; ".join(e["error"] for e in errors),
+                        "message": "; ".join(e.get("message", e["error"]) for e in errors),
+                    }
+                msgs = [r.get("message", "") for r in results if r.get("message")]
+                return {"success": True, "message": " | ".join(msgs)}
+            result = await agent.create_automation(automation_data)
             if result.get("error") and result.get("message"):
                 return {"error": result["error"], "message": result["message"]}
             return result

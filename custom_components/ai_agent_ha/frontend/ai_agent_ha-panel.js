@@ -1250,31 +1250,46 @@ class AiAgentHaPanel extends LitElement {
         }
       } catch (_) {}
     }
+    const automations = automation ? (Array.isArray(automation) ? automation : [automation]) : [];
     const isAssistant = msg.type === "assistant";
-    const textContent = isAssistant && !automation && !dashboard
+    const textContent = isAssistant && automations.length === 0 && !dashboard
       ? unsafeHTML(markdownToHtml(text))
       : text;
     return html`
       <div class="message ${msg.type}-message">
         ${textContent}
-        ${automation ? html`
-          <div class="automation-suggestion">
-            <div class="automation-title">${automation.alias}</div>
-            <div class="automation-description">${automation.description}</div>
-            <div class="automation-details">
-              ${JSON.stringify(automation, null, 2)}
-            </div>
-            <div class="automation-actions">
+        ${automations.length > 0 ? html`
+          ${automations.length > 1 ? html`
+            <div class="automation-actions" style="margin-bottom:8px;">
               <ha-button
-                @click=${() => this._approveAutomation(automation)}
+                @click=${() => this._approveAutomation(automations)}
                 .disabled=${this._isLoading}
-              >Approve</ha-button>
+              >Alle übernehmen (${automations.length})</ha-button>
               <ha-button
                 @click=${() => this._rejectAutomation()}
                 .disabled=${this._isLoading}
-              >Reject</ha-button>
+              >Alle ablehnen</ha-button>
             </div>
-          </div>
+          ` : ''}
+          ${automations.map(a => html`
+            <div class="automation-suggestion">
+              <div class="automation-title">${a.alias}</div>
+              <div class="automation-description">${a.description}</div>
+              <div class="automation-details">
+                ${JSON.stringify(a, null, 2)}
+              </div>
+              <div class="automation-actions">
+                <ha-button
+                  @click=${() => this._approveAutomation(a)}
+                  .disabled=${this._isLoading}
+                >Approve</ha-button>
+                <ha-button
+                  @click=${() => this._rejectAutomation()}
+                  .disabled=${this._isLoading}
+                >Reject</ha-button>
+              </div>
+            </div>
+          `)}
         ` : ''}
         ${dashboard ? html`
           <div class="dashboard-suggestion">
@@ -1541,34 +1556,32 @@ class AiAgentHaPanel extends LitElement {
     if (this._isLoading) return;
     this._isLoading = true;
     try {
-      const result = await this.hass.callService('ai_agent_ha', 'create_automation', {
-        automation: automation
-      });
-
-      dbg("Automation creation result:", result);
-
-      // The result should be an object with a message property
-      if (result && result.message) {
-        if (result.error) {
-          this._error = result.error;
+      const items = Array.isArray(automation) ? automation : [automation];
+      const results = [];
+      for (const item of items) {
+        try {
+          await this.hass.callService('ai_agent_ha', 'create_automation', {
+            automation: item,
+            provider: this._selectedProvider || undefined
+          });
+          results.push({ alias: item.alias, ok: true });
+        } catch (err) {
+          console.error("Error creating automation:", item.alias, err);
+          results.push({ alias: item.alias, ok: false, error: err.message || String(err) });
         }
-        this._messages = [...this._messages, {
-          type: 'assistant',
-          text: result.message
-        }];
-      } else if (result && result.error) {
-        this._error = result.error;
-        this._messages = [...this._messages, {
-          type: 'assistant',
-          text: result.error
-        }];
-      } else {
-        // Fallback success message if no message is provided
-        this._messages = [...this._messages, {
-          type: 'assistant',
-          text: `Automation "${automation.alias}" has been created successfully!`
-        }];
       }
+      const succeeded = results.filter(r => r.ok);
+      const failed = results.filter(r => !r.ok);
+      let text = '';
+      if (succeeded.length > 0) {
+        text += succeeded.map(r => `Automation "${r.alias}" wurde erfolgreich erstellt!`).join('\n');
+      }
+      if (failed.length > 0) {
+        if (text) text += '\n';
+        text += failed.map(r => `Fehler bei "${r.alias}": ${r.error}`).join('\n');
+        this._error = failed.map(r => r.error).join('; ');
+      }
+      this._messages = [...this._messages, { type: 'assistant', text }];
     } catch (error) {
       console.error("Error creating automation:", error);
       this._error = error.message || 'An error occurred while creating the automation';

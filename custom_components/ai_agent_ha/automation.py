@@ -27,15 +27,29 @@ def _remove_none_from_automation_data(obj: Any) -> Any:
     return obj
 
 
+def _ensure_list(value: Any) -> List[Any]:
+    """Ensure trigger/condition/action are lists (HA expects list of items)."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
 def sanitize_automation_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Sanitize automation configuration to prevent injection attacks."""
+    """Sanitize automation configuration to prevent injection attacks.
+    Normalizes trigger/condition/action to lists (HA format; AI may return single objects).
+    """
     sanitized: Dict[str, Any] = {}
     for key, value in config.items():
         if key in ["alias", "description"]:
             sanitized[key] = str(value).strip()[:100]
         elif key in ["trigger", "condition", "action"]:
-            if isinstance(value, list):
-                sanitized[key] = _remove_none_from_automation_data(value)
+            as_list = _ensure_list(value)
+            if as_list:
+                sanitized[key] = _remove_none_from_automation_data(as_list)
         elif key == "mode":
             if value in ["single", "restart", "queued", "parallel"]:
                 sanitized[key] = value
