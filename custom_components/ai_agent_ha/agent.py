@@ -42,10 +42,13 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_LANGUAGE,
+    CONF_REQUEST_TIMEOUT,
     CONF_SYSTEM_PROMPT,
     CONF_WEATHER_ENTITY,
     DEFAULT_LANGUAGE,
+    DEFAULT_REQUEST_TIMEOUT,
     DOMAIN,
+    MAX_PROMPT_CHARS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -153,12 +156,13 @@ class OllamaClient(BaseAIClient):
             "keep_alive": "15m",
         }
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self.chat_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -263,12 +267,13 @@ class LocalClient(BaseAIClient):
                 payload.get("model"),
             )
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self.url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -592,12 +597,13 @@ class LlamaClient(BaseAIClient):
 
         _LOGGER.debug("Llama request payload: %s", json.dumps(payload, indent=2))
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -654,12 +660,13 @@ class OpenAIClient(BaseAIClient):
 
         _LOGGER.debug("OpenAI request payload: %s", json.dumps(payload, indent=2))
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 response_text = await resp.text()
                 _LOGGER.debug("OpenAI API response status: %d", resp.status)
@@ -748,12 +755,13 @@ class GeminiClient(BaseAIClient):
 
         _LOGGER.debug("Gemini request payload: %s", json.dumps(payload, indent=2))
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url_with_key,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 response_text = await resp.text()
                 _LOGGER.debug("Gemini API response status: %d", resp.status)
@@ -858,12 +866,13 @@ class AnthropicClient(BaseAIClient):
 
         _LOGGER.debug("Anthropic request payload: %s", json.dumps(payload, indent=2))
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -904,12 +913,13 @@ class OpenRouterClient(BaseAIClient):
 
         _LOGGER.debug("OpenRouter request payload: %s", json.dumps(payload, indent=2))
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -952,12 +962,13 @@ class AlterClient(BaseAIClient):
 
         _LOGGER.debug("Alter request payload: %s", json.dumps(payload, indent=2))
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -1006,12 +1017,13 @@ class ZaiClient(BaseAIClient):
 
         _LOGGER.debug("z.ai request payload: %s", json.dumps(payload, indent=2))
 
+        timeout_sec = kwargs.get("timeout", DEFAULT_REQUEST_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -1267,6 +1279,28 @@ class AiAgentHaAgent:
         ),
     }
 
+    # Shorter system prompt for local/Ollama to reduce token usage and stay under context limits
+    SYSTEM_PROMPT_LOCAL_SHORT = {
+        "role": "system",
+        "content": (
+            "You are a Home Assistant AI. Reply ONLY with valid JSON, no text before or after.\n\n"
+            "Commands: get_entity_state(entity_id), get_entities_by_domain(domain), get_entities_by_device_class(device_class, domain?), "
+            "get_climate_related_entities(), get_entities_by_area(area_id), get_entities(area_id='x' or area_ids=['a','b']), "
+            "get_automations(), get_weather_data(), get_entity_registry(), get_device_registry(), get_area_registry(), get_history(entity_id, hours), "
+            "get_person_data(), get_scenes(), get_dashboards(), get_dashboard_config(url), set_entity_state(...), call_service(domain, service, target?, service_data?), "
+            "create_automation(automation), create_dashboard(dashboard_config), update_dashboard(url, config).\n"
+            "Vacuums: get_entities_by_domain('vacuum'). Wrong entities: reply with data_request to fetch correct ones.\n"
+            "Days: ['fri','mon','sat','sun','thu','tue','wed']. Automations: request entities first for real entity_ids.\n\n"
+            "JSON formats:\n"
+            "Data: {\"request_type\":\"data_request\",\"request\":\"cmd\",\"parameters\":{...}}\n"
+            "Automation: {\"request_type\":\"automation_suggestion\",\"message\":\"...\",\"automation\":{\"alias\",\"description\",\"trigger\",\"condition\",\"action\"}}\n"
+            "Dashboard: {\"request_type\":\"dashboard_suggestion\",\"message\":\"...\",\"dashboard\":{\"title\",\"url_path\",\"views\":[...]}}\n"
+            "Answer: {\"request_type\":\"final_response\",\"response\":\"...\"}\n"
+            "Service: {\"request_type\":\"call_service\",\"domain\",\"service\",\"target\",\"service_data\"}\n\n"
+            "Rules: One JSON object only. User-facing text in \"message\" or \"response\". Dashboards → dashboard_suggestion, not final_response."
+        ),
+    }
+
     def __init__(self, hass: HomeAssistant, config: Dict[str, Any]):
         """Initialize the agent with provider selection."""
         self.hass = hass
@@ -1290,8 +1324,8 @@ class AiAgentHaAgent:
 
         # Set the appropriate system prompt based on provider (can be overridden by custom prompt from Store)
         if provider in ("local", "ollama"):
-            self._default_system_prompt = self.SYSTEM_PROMPT_LOCAL
-            _LOGGER.debug("Using local-optimized system prompt")
+            self._default_system_prompt = self.SYSTEM_PROMPT_LOCAL_SHORT
+            _LOGGER.debug("Using short local system prompt (saves context for Ollama)")
         else:
             self._default_system_prompt = self.SYSTEM_PROMPT
             _LOGGER.debug("Using standard system prompt")
@@ -3869,6 +3903,25 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             "conversation": history_tail,
         }
 
+    def _trim_messages_to_char_limit(
+        self, messages: List[Dict[str, Any]], max_chars: int = MAX_PROMPT_CHARS
+    ) -> List[Dict[str, Any]]:
+        """Trim message list so total content length stays under max_chars (Ollama limit 65536)."""
+        total = 0
+        result: List[Dict[str, Any]] = []
+        for msg in reversed(messages):
+            content = (msg.get("content") or "")
+            if isinstance(content, list):
+                content = " ".join(
+                    p.get("text", str(p)) for p in content if isinstance(p, dict)
+                )
+            content_len = len(str(content))
+            if total + content_len > max_chars and result:
+                break
+            result.insert(0, msg)
+            total += content_len
+        return result
+
     async def _get_ai_response(self) -> str:
         """Get response from the selected AI provider with retries and rate limiting."""
         if not self._check_rate_limit():
@@ -3884,6 +3937,16 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
         # Ensure system prompt is always the first message
         if not recent_messages or recent_messages[0].get("role") != "system":
             recent_messages = [self.system_prompt] + recent_messages
+        # Trim to stay under Ollama/local model prompt limit (65536 chars)
+        orig_len = len(recent_messages)
+        recent_messages = self._trim_messages_to_char_limit(recent_messages)
+        if len(recent_messages) < orig_len:
+            _LOGGER.warning(
+                "Trimmed conversation from %d to %d messages to stay under %d chars (Ollama limit 65536)",
+                orig_len,
+                len(recent_messages),
+                MAX_PROMPT_CHARS,
+            )
 
         _LOGGER.debug("Sending %d messages to AI provider", len(recent_messages))
         _LOGGER.debug("AI provider: %s", self.config.get("ai_provider", "unknown"))
@@ -3895,7 +3958,12 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
                     retry_count + 1,
                     self._max_retries,
                 )
-                response = await self.ai_client.get_response(recent_messages)
+                request_timeout = self.config.get(
+                    CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT
+                )
+                response = await self.ai_client.get_response(
+                    recent_messages, timeout=request_timeout
+                )
                 _LOGGER.debug(
                     "AI client returned response of length: %d", len(response or "")
                 )
@@ -3933,16 +4001,30 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
                 return str(response)
             except Exception as e:
+                err_msg = str(e).strip() or getattr(e, "message", repr(e))
                 _LOGGER.error(
-                    "AI client error on attempt %d: %s", retry_count + 1, str(e)
+                    "AI client error on attempt %d: %s - %s",
+                    retry_count + 1,
+                    type(e).__name__,
+                    err_msg,
                 )
                 last_error = e
                 retry_count += 1
                 if retry_count < self._max_retries:
                     await asyncio.sleep(self._retry_delay * retry_count)
                 continue
+        last_msg = str(last_error).strip() if last_error else "unknown"
+        if not last_msg:
+            last_msg = f"{type(last_error).__name__} (no message)"
+        hint = ""
+        if last_error and (
+            "disconnect" in last_msg.lower()
+            or "connection" in last_msg.lower()
+            or "reset" in last_msg.lower()
+        ):
+            hint = " Verlauf leeren und erneut versuchen oder Request-Timeout in den Integrations-Optionen erhöhen."
         raise Exception(
-            f"Failed after {retry_count} retries. Last error: {str(last_error)}"
+            f"Failed after {retry_count} retries. Last error: {last_msg}.{hint}"
         )
 
     def clear_conversation_history(self) -> None:
@@ -4224,7 +4306,7 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
 
 
 def get_default_system_prompt_content_for_provider(provider: str) -> str:
-    """Return the default system prompt content for local/ollama provider, else empty string."""
+    """Return the default system prompt content for local/ollama provider (short version), else empty string."""
     if provider in ("local", "ollama"):
-        return AiAgentHaAgent.SYSTEM_PROMPT_LOCAL.get("content", "")
+        return AiAgentHaAgent.SYSTEM_PROMPT_LOCAL_SHORT.get("content", "")
     return ""

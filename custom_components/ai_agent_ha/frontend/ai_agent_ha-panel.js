@@ -18,6 +18,9 @@ const PROVIDERS = {
   ollama: "Ollama (lokal)",
 };
 
+// Frontend fallback timeout (ms) – only used if no response event arrives; 5 min for local/slow models
+const FRONTEND_REQUEST_TIMEOUT_MS = 300000;
+
 class AiAgentHaPanel extends LitElement {
   static get properties() {
     return {
@@ -486,6 +489,15 @@ class AiAgentHaPanel extends LitElement {
           transform: translateY(0);
         }
       }
+      .verlauf-hint {
+        font-size: 0.75rem;
+        color: var(--secondary-text-color);
+        padding: 4px 0 8px 0;
+        margin: 0;
+      }
+      .verlauf-hint strong {
+        color: var(--primary-text-color);
+      }
       .error {
         color: var(--error-color);
         padding: 16px;
@@ -739,42 +751,61 @@ class AiAgentHaPanel extends LitElement {
       this.providersLoaded = true;
 
       try {
-        // Uses the WebSocket API to get all entries with their complete data
-        const allEntries = await this.hass.callWS({ type: 'config_entries/get' });
+        // Prefer backend service: list of configured providers (works after reinstall)
+        let serviceResult;
+        try {
+          const raw = await this.hass.callService(
+            'ai_agent_ha',
+            'get_configured_providers',
+            {},
+            {},
+            true
+          );
+          serviceResult = raw?.response !== undefined ? raw.response : raw;
+        } catch (_) {
+          serviceResult = null;
+        }
+        const fromService = serviceResult?.providers && Array.isArray(serviceResult.providers)
+          ? serviceResult.providers
+          : [];
 
-        const aiAgentEntries = allEntries.filter(
-          entry => entry.domain === 'ai_agent_ha'
-        );
-
-        if (aiAgentEntries.length > 0) {
-          const providers = aiAgentEntries
-            .map(entry => {
-              const provider = this._resolveProviderFromEntry(entry);
-              if (!provider) return null;
-
-              return {
-                value: provider,
-                label: PROVIDERS[provider] || provider
-              };
-            })
-            .filter(Boolean);
-
-          this._availableProviders = providers;
-
-          console.debug("Available AI providers (mapped from data/title):", this._availableProviders);
-
-          if (
-            (!this._selectedProvider || !providers.find(p => p.value === this._selectedProvider)) &&
-            providers.length > 0
-          ) {
-            this._selectedProvider = providers[0].value;
-          }
+        if (fromService.length > 0) {
+          this._availableProviders = fromService;
+          console.debug("Available AI providers (from backend service):", this._availableProviders);
         } else {
-          console.debug("No 'ai_agent_ha' config entries found via WebSocket.");
-          this._availableProviders = [];
+          // Fallback: WebSocket config entries (e.g. if service not yet available)
+          const allEntries = await this.hass.callWS({ type: 'config_entries/get' });
+          const aiAgentEntries = (Array.isArray(allEntries) ? allEntries : []).filter(
+            entry => entry && entry.domain === 'ai_agent_ha'
+          );
+
+          if (aiAgentEntries.length > 0) {
+            const providers = aiAgentEntries
+              .map(entry => {
+                const provider = this._resolveProviderFromEntry(entry);
+                if (!provider) return null;
+                return {
+                  value: provider,
+                  label: PROVIDERS[provider] || provider
+                };
+              })
+              .filter(Boolean);
+            this._availableProviders = providers;
+            console.debug("Available AI providers (from config_entries):", this._availableProviders);
+          } else {
+            console.debug("No configured AI providers found (service and config_entries).");
+            this._availableProviders = [];
+          }
+        }
+
+        if (
+          (!this._selectedProvider || !this._availableProviders.find(p => p.value === this._selectedProvider)) &&
+          this._availableProviders.length > 0
+        ) {
+          this._selectedProvider = this._availableProviders[0].value;
         }
       } catch (error) {
-        console.error("Error fetching config entries via WebSocket:", error);
+        console.error("Error loading AI providers:", error);
         this._error = error.message || 'Failed to load AI provider configurations.';
         this._availableProviders = [];
       }
@@ -1015,9 +1046,10 @@ class AiAgentHaPanel extends LitElement {
             class="clear-button"
             @click=${this._clearChat}
             ?disabled=${this._isLoading}
+            title="${this._messages.length ? 'Verlauf leeren – aktuell ' + this._messages.length + ' Nachrichten im Kontext' : 'Verlauf leeren'}"
           >
             <ha-icon icon="mdi:delete-sweep"></ha-icon>
-            <span>Clear Chat</span>
+            <span>Clear Chat${this._messages.length ? ' (' + this._messages.length + ')' : ''}</span>
           </button>
         </div>
       </div>
@@ -1040,6 +1072,12 @@ class AiAgentHaPanel extends LitElement {
             ` : ''}
             ${this._showThinking ? this._renderThinkingPanel() : ''}
           </div>
+          ${this._messages.length > 0 ? html`
+            <div class="verlauf-hint" title="Anzahl Nachrichten, die als Kontext mitgeschickt werden. Bei vielen Nachrichten 'Clear Chat' nutzen, um frisch zu starten.">
+              Verlauf: ${this._messages.length} Nachricht${this._messages.length !== 1 ? 'en' : ''} im Kontext
+              ${this._messages.length >= 6 ? html` – <strong>Clear Chat</strong> startet frisch` : ''}
+            </div>
+          ` : ''}
           ${this._renderPromptsSection()}
           <div class="input-container">
             <div class="input-main">
@@ -1219,7 +1257,7 @@ class AiAgentHaPanel extends LitElement {
       clearTimeout(this._serviceCallTimeout);
     }
 
-    // Set timeout to clear loading state after 60 seconds
+    // Fallback timeout if no response event arrives (do not wait for service return – response comes via event)
     this._serviceCallTimeout = setTimeout(() => {
       if (this._isLoading) {
         console.warn("Service call timeout - clearing loading state");
@@ -1231,16 +1269,14 @@ class AiAgentHaPanel extends LitElement {
         }];
         this.requestUpdate();
       }
-    }, 60000); // 60 second timeout
+    }, FRONTEND_REQUEST_TIMEOUT_MS);
 
-    try {
-      console.debug("Calling ai_agent_ha service");
-      await this.hass.callService('ai_agent_ha', 'query', {
-        prompt: prompt,
-        provider: this._selectedProvider,
-        debug: this._showThinking
-      });
-    } catch (error) {
+    console.debug("Calling ai_agent_ha service (response will arrive via event)");
+    this.hass.callService('ai_agent_ha', 'query', {
+      prompt: prompt,
+      provider: this._selectedProvider,
+      debug: this._showThinking
+    }).catch((error) => {
       console.error("Error calling service:", error);
       this._clearLoadingState();
       this._error = error.message || 'An error occurred while processing your request';
@@ -1248,7 +1284,8 @@ class AiAgentHaPanel extends LitElement {
         type: 'assistant',
         text: `Error: ${this._error}`
       }];
-    }
+      this.requestUpdate();
+    });
   }
 
   _clearLoadingState() {
@@ -1270,6 +1307,11 @@ class AiAgentHaPanel extends LitElement {
         this._thinkingExpanded = true;
       }
     if (event.data.success) {
+      this._error = null;
+      const last = this._messages[this._messages.length - 1];
+      if (last && last.type === 'assistant' && last.text && last.text.includes('request timed out')) {
+        this._messages = this._messages.slice(0, -1);
+      }
       // Check if the answer is empty
       if (!event.data.answer || event.data.answer.trim() === '') {
         console.warn("AI agent returned empty response");
@@ -1456,7 +1498,7 @@ class AiAgentHaPanel extends LitElement {
            changedProps.has('_showThinking');
   }
 
-  _clearChat() {
+  async _clearChat() {
     this._messages = [];
     this._clearLoadingState();
     this._error = null;
@@ -1465,11 +1507,16 @@ class AiAgentHaPanel extends LitElement {
     this._lastDebugInfo = null;
     this._chatHistoryLoaded = false;
     if (this.hass && this._selectedProvider) {
-      this.hass.callService('ai_agent_ha', 'save_chat_history', {
-        provider: this._selectedProvider,
-        messages: []
-      }).catch(() => {});
+      try {
+        await this.hass.callService('ai_agent_ha', 'save_chat_history', {
+          provider: this._selectedProvider,
+          messages: []
+        });
+      } catch (e) {
+        console.warn('Clear chat: save_chat_history failed', e);
+      }
     }
+    this.requestUpdate();
     // Don't clear prompt history - users might want to keep it
   }
 

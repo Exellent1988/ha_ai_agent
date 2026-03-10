@@ -147,3 +147,5 @@ ehthumbs.db
 Desktop.ini
 CLAUDE.md
 .claude/*
+scripts/sync_to_ha_install.sh
+test_chats/

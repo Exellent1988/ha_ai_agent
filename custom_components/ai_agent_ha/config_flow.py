@@ -9,6 +9,8 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
     SelectSelector,
     SelectSelectorConfig,
     TextSelector,
@@ -23,8 +25,10 @@ from .const import (
     CONF_LOCAL_MODEL,
     CONF_LOCAL_URL,
     CONF_OLLAMA_URL,
+    CONF_REQUEST_TIMEOUT,
     CONF_SYSTEM_PROMPT,
     DEFAULT_LANGUAGE,
+    DEFAULT_REQUEST_TIMEOUT,
     DOMAIN,
 )
 
@@ -229,6 +233,22 @@ def _store_system_prompt_from_input(config_data: dict, user_input: dict) -> None
     """Store system prompt and language from user input into config_data."""
     config_data[CONF_LANGUAGE] = user_input.get(CONF_LANGUAGE, DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE
     config_data[CONF_SYSTEM_PROMPT] = user_input.get(CONF_SYSTEM_PROMPT, "") or ""
+
+
+def _add_request_timeout_field(
+    schema_dict: dict, default: int = DEFAULT_REQUEST_TIMEOUT
+) -> None:
+    """Add optional request timeout (seconds) for AI API calls; local models may need higher values."""
+    schema_dict[
+        vol.Optional(CONF_REQUEST_TIMEOUT, default=default)
+    ] = NumberSelector(
+        NumberSelectorConfig(
+            min=30,
+            max=900,
+            step=1,
+            mode="box",
+        )
+    )
 
 
 class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg,misc]
@@ -606,6 +626,9 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                     updated_data[CONF_SYSTEM_PROMPT] = (
                         user_input.get(CONF_SYSTEM_PROMPT, "") or ""
                     )
+                    updated_data[CONF_REQUEST_TIMEOUT] = int(
+                        user_input.get(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)
+                    )
 
                     # Update the config entry
                     self.hass.config_entries.async_update_entry(
@@ -647,6 +670,10 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
                 default_prompt=self.config_entry.data.get(CONF_SYSTEM_PROMPT, ""),
             )
+            _add_request_timeout_field(
+                schema_dict,
+                self.config_entry.data.get(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT),
+            )
 
             return self.async_show_form(
                 step_id="configure_options",
@@ -687,6 +714,10 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
                 default_prompt=_default_prompt,
             )
+            _add_request_timeout_field(
+                schema_dict,
+                self.config_entry.data.get(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT),
+            )
 
             return self.async_show_form(
                 step_id="configure_options",
@@ -724,6 +755,10 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
                 default_prompt=_default_prompt,
             )
+            _add_request_timeout_field(
+                schema_dict,
+                self.config_entry.data.get(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT),
+            )
 
             return self.async_show_form(
                 step_id="configure_options",
@@ -760,6 +795,10 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
             schema_dict,
             default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
             default_prompt=self.config_entry.data.get(CONF_SYSTEM_PROMPT, ""),
+        )
+        _add_request_timeout_field(
+            schema_dict,
+            self.config_entry.data.get(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT),
         )
 
         return self.async_show_form(

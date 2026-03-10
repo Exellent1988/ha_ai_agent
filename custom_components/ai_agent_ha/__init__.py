@@ -14,7 +14,15 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .agent import AiAgentHaAgent
-from .const import CONF_LANGUAGE, CONF_SYSTEM_PROMPT, DEFAULT_LANGUAGE, DOMAIN
+from .config_flow import PROVIDERS as PROVIDER_LABELS
+from .const import (
+    CONF_LANGUAGE,
+    CONF_REQUEST_TIMEOUT,
+    CONF_SYSTEM_PROMPT,
+    DEFAULT_LANGUAGE,
+    DEFAULT_REQUEST_TIMEOUT,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +53,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             new_data[CONF_LANGUAGE] = DEFAULT_LANGUAGE
         if CONF_SYSTEM_PROMPT not in new_data:
             new_data[CONF_SYSTEM_PROMPT] = ""
+        if CONF_REQUEST_TIMEOUT not in new_data:
+            new_data[CONF_REQUEST_TIMEOUT] = DEFAULT_REQUEST_TIMEOUT
         if new_data != entry.data:
             hass.config_entries.async_update_entry(entry, data=new_data)
         return True
@@ -354,6 +364,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Error loading chat history: {e}")
             return {"error": str(e), "messages": []}
 
+    async def async_handle_get_configured_providers(call):
+        """Return list of configured providers for the frontend (value + label)."""
+        try:
+            if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
+                return {"providers": []}
+            providers = [
+                {
+                    "value": provider_id,
+                    "label": PROVIDER_LABELS.get(provider_id, provider_id),
+                }
+                for provider_id in hass.data[DOMAIN]["agents"].keys()
+            ]
+            return {"providers": providers}
+        except Exception as e:
+            _LOGGER.error("Error getting configured providers: %s", e)
+            return {"providers": []}
+
     async def async_handle_create_dashboard(call):
         """Handle the create_dashboard service call."""
         try:
@@ -460,6 +487,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "load_chat_history", async_handle_load_chat_history
     )
     hass.services.async_register(
+        DOMAIN,
+        "get_configured_providers",
+        async_handle_get_configured_providers,
+    )
+    hass.services.async_register(
         DOMAIN, "create_dashboard", async_handle_create_dashboard
     )
     hass.services.async_register(
@@ -527,6 +559,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_remove(DOMAIN, "load_system_prompt_settings")
     hass.services.async_remove(DOMAIN, "save_chat_history")
     hass.services.async_remove(DOMAIN, "load_chat_history")
+    hass.services.async_remove(DOMAIN, "get_configured_providers")
     hass.services.async_remove(DOMAIN, "create_dashboard")
     hass.services.async_remove(DOMAIN, "update_dashboard")
     # Remove data

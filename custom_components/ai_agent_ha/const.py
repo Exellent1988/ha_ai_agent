@@ -33,9 +33,15 @@ AI_PROVIDERS = [
 CONF_MODELS = "models"
 CONF_SYSTEM_PROMPT = "system_prompt"
 CONF_LANGUAGE = "language"
+CONF_REQUEST_TIMEOUT = "request_timeout"
 
 # Default values for model configuration
 DEFAULT_LANGUAGE = "Deutsch"
+# Request timeout in seconds (for AI API calls; local models may need higher values)
+DEFAULT_REQUEST_TIMEOUT = 300
+
+# Max total prompt size in characters (Ollama truncates at 65536; keep under to avoid truncation)
+MAX_PROMPT_CHARS = 60000
 
 # Supported AI providers
 DEFAULT_AI_PROVIDER = "openai"
