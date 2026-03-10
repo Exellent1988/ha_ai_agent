@@ -112,9 +112,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN] = {"agents": {}, "configs": {}, "entry_titles": {}}
 
         provider = config_data["ai_provider"]
-        hass.data[DOMAIN].setdefault("entry_titles", {})[provider] = entry.title
+        # Migrate legacy "local" provider to "ollama"
+        if provider == "local":
+            from urllib.parse import urlparse
+            local_url = (config_data.get("local_url") or "").strip().rstrip("/")
+            if "/api/" in local_url:
+                base = local_url.split("/api/")[0]
+            elif "/v1/" in local_url:
+                base = local_url.split("/v1/")[0]
+            else:
+                base = local_url or "http://localhost:11434"
+            new_data = dict(config_data)
+            new_data["ai_provider"] = "ollama"
+            new_data["ollama_url"] = base
+            new_data.setdefault("models", {})["ollama"] = (config_data.get("models") or {}).get("local", "llama3.2")
+            hass.config_entries.async_update_entry(entry, data=new_data)
+            config_data = new_data
+            provider = "ollama"
 
-        # Validate provider
+        entry_id = entry.entry_id
+        # Label for UI: "Provider - Modellname" (e.g. "Ollama - qwen3:4b-instruct")
+        model = (config_data.get("models") or {}).get(provider, "").strip()
+        label = (
+            f"{PROVIDER_LABELS.get(provider, provider)} - {model}"
+            if model
+            else PROVIDER_LABELS.get(provider, provider)
+        )
+        hass.data[DOMAIN].setdefault("entry_titles", {})[entry_id] = label
+
+        # Validate provider (local removed; use ollama)
         if provider not in [
             "llama",
             "openai",
@@ -123,18 +149,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "anthropic",
             "alter",
             "zai",
-            "local",
             "ollama",
         ]:
             _LOGGER.error("Unknown AI provider: %s", provider)
             raise ConfigEntryNotReady(f"Unknown AI provider: {provider}")
 
-        # Store config for this provider
-        hass.data[DOMAIN]["configs"][provider] = config_data
+        # Store config and agent by entry_id (allows multiple entries per provider)
+        hass.data[DOMAIN]["configs"][entry_id] = config_data
 
-        # Create agent for this provider
+        # Create agent for this entry
         _LOGGER.debug(
-            "Creating AI agent for provider %s with config: %s",
+            "Creating AI agent for entry %s (provider %s) with config: %s",
+            entry_id,
             provider,
             {
                 k: v
@@ -150,9 +176,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ]
             },
         )
-        hass.data[DOMAIN]["agents"][provider] = AiAgentHaAgent(hass, config_data)
+        hass.data[DOMAIN]["agents"][entry_id] = AiAgentHaAgent(
+            hass, config_data, entry_id=entry_id
+        )
 
-        _LOGGER.info("Successfully set up AI Agent HA for provider: %s", provider)
+        _LOGGER.info("Successfully set up AI Agent HA for entry %s (provider: %s)", entry_id, provider)
 
     except KeyError as err:
         _LOGGER.error("Missing required configuration key: %s", err)
@@ -174,26 +202,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.bus.async_fire("ai_agent_ha_response", result)
                 return
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                # Get the first available provider
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                # Fallback: first available entry
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     _LOGGER.error("No AI agents available")
                     result = {"error": "No AI agents configured"}
                     hass.bus.async_fire("ai_agent_ha_response", result)
                     return
-                provider = available_providers[0]
-                _LOGGER.debug(f"Using fallback provider: {provider}")
+                entry_id = available[0]
+                _LOGGER.debug("Using fallback entry: %s", entry_id)
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
             user_id = call.context.user_id if call.context.user_id else "default"
+            request_id = call.data.get("request_id") or ""
             result = await agent.process_query(
                 call.data.get("prompt", ""),
-                provider=provider,
+                provider=entry_id,
                 debug=call.data.get("debug", False),
                 user_id=user_id,
+                request_id=request_id or None,
             )
+            if isinstance(result, dict):
+                result["request_id"] = request_id
             hass.bus.async_fire("ai_agent_ha_response", result)
         except Exception as e:
             _LOGGER.error(f"Error processing query: {e}")
@@ -210,23 +242,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return {"error": "No AI agents configured"}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                # Get the first available provider
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     _LOGGER.error("No AI agents available")
                     return {"error": "No AI agents configured"}
-                provider = available_providers[0]
-                _LOGGER.debug(f"Using fallback provider: {provider}")
+                entry_id = available[0]
+                _LOGGER.debug("Using fallback entry: %s", entry_id)
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
             result = await agent.create_automation(call.data.get("automation", {}))
             if result.get("error") and result.get("message"):
                 return {"error": result["error"], "message": result["message"]}
             return result
         except Exception as e:
             _LOGGER.error(f"Error creating automation: {e}")
+            return {"error": str(e), "message": str(e)}
+
+    async def async_handle_update_automation(call):
+        """Handle the update_automation service call."""
+        try:
+            if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
+                _LOGGER.error(
+                    "No AI agents available. Please configure the integration first."
+                )
+                return {"error": "No AI agents configured"}
+
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
+                    _LOGGER.error("No AI agents available")
+                    return {"error": "No AI agents configured"}
+                entry_id = available[0]
+                _LOGGER.debug("Using fallback entry: %s", entry_id)
+
+            agent = hass.data[DOMAIN]["agents"][entry_id]
+            automation_id_or_alias = call.data.get("automation_id_or_alias", "")
+            automation_config = call.data.get("automation", {})
+            if not automation_id_or_alias:
+                return {"error": "automation_id_or_alias is required (id or alias)"}
+            result = await agent.update_automation(
+                automation_id_or_alias, automation_config
+            )
+            if result.get("error") and result.get("message"):
+                return {"error": result["error"], "message": result["message"]}
+            return result
+        except Exception as e:
+            _LOGGER.error(f"Error updating automation: {e}")
             return {"error": str(e), "message": str(e)}
 
     async def async_handle_save_prompt_history(call):
@@ -239,17 +303,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return {"error": "No AI agents configured"}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                # Get the first available provider
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     _LOGGER.error("No AI agents available")
                     return {"error": "No AI agents configured"}
-                provider = available_providers[0]
-                _LOGGER.debug(f"Using fallback provider: {provider}")
+                entry_id = available[0]
+                _LOGGER.debug("Using fallback entry: %s", entry_id)
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
             user_id = call.context.user_id if call.context.user_id else "default"
             result = await agent.save_user_prompt_history(
                 user_id, call.data.get("history", [])
@@ -269,17 +332,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return {"error": "No AI agents configured"}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                # Get the first available provider
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     _LOGGER.error("No AI agents available")
                     return {"error": "No AI agents configured"}
-                provider = available_providers[0]
-                _LOGGER.debug(f"Using fallback provider: {provider}")
+                entry_id = available[0]
+                _LOGGER.debug("Using fallback entry: %s", entry_id)
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
             user_id = call.context.user_id if call.context.user_id else "default"
             result = await agent.load_user_prompt_history(user_id)
             _LOGGER.debug("Load prompt history result: %s", result)
@@ -294,31 +356,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
                 return {"error": "No AI agents configured"}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     return {"error": "No AI agents configured"}
-                provider = available_providers[0]
+                entry_id = available[0]
 
             system_prompt = call.data.get("system_prompt")
             language = call.data.get("language")
 
-            # Update config entry for persistence
+            # Update config entry for persistence (match by entry_id)
             entries = hass.config_entries.async_entries(DOMAIN)
-            for entry in entries:
-                if entry.data.get("ai_provider") == provider:
-                    new_data = dict(entry.data)
+            for config_entry in entries:
+                if config_entry.entry_id == entry_id:
+                    new_data = dict(config_entry.data)
                     new_data[CONF_LANGUAGE] = (
                         (language or "").strip() or DEFAULT_LANGUAGE
                     )
                     new_data[CONF_SYSTEM_PROMPT] = (system_prompt or "").strip()
-                    hass.config_entries.async_update_entry(entry, data=new_data)
+                    hass.config_entries.async_update_entry(config_entry, data=new_data)
                     if "configs" in hass.data[DOMAIN]:
-                        hass.data[DOMAIN]["configs"][provider] = new_data
+                        hass.data[DOMAIN]["configs"][entry_id] = new_data
                     break
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
             result = await agent.save_system_prompt_settings(
                 system_prompt=system_prompt,
                 language=language,
@@ -334,14 +396,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
                 return {"error": "No AI agents configured"}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     return {"error": "No AI agents configured"}
-                provider = available_providers[0]
+                entry_id = available[0]
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
             return await agent.load_system_prompt_settings()
         except Exception as e:
             _LOGGER.error(f"Error loading system prompt settings: {e}")
@@ -353,14 +415,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
                 return {"error": "No AI agents configured"}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     return {"error": "No AI agents configured"}
-                provider = available_providers[0]
+                entry_id = available[0]
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
             user_id = call.context.user_id if call.context.user_id else "default"
             return await agent.save_chat_history(
                 user_id, call.data.get("messages", [])
@@ -375,14 +437,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
                 return {"error": "No AI agents configured", "messages": []}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     return {"error": "No AI agents configured", "messages": []}
-                provider = available_providers[0]
+                entry_id = available[0]
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
             user_id = call.context.user_id if call.context.user_id else "default"
             return await agent.load_chat_history(user_id)
         except Exception as e:
@@ -417,17 +479,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return {"error": "No AI agents configured"}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                # Get the first available provider
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     _LOGGER.error("No AI agents available")
                     return {"error": "No AI agents configured"}
-                provider = available_providers[0]
-                _LOGGER.debug(f"Using fallback provider: {provider}")
+                entry_id = available[0]
+                _LOGGER.debug("Using fallback entry: %s", entry_id)
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
 
             # Parse dashboard config if it's a string
             dashboard_config = call.data.get("dashboard_config", {})
@@ -456,17 +517,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return {"error": "No AI agents configured"}
 
-            provider = call.data.get("provider")
-            if provider not in hass.data[DOMAIN]["agents"]:
-                # Get the first available provider
-                available_providers = list(hass.data[DOMAIN]["agents"].keys())
-                if not available_providers:
+            entry_id = call.data.get("provider")
+            if entry_id not in hass.data[DOMAIN]["agents"]:
+                available = list(hass.data[DOMAIN]["agents"].keys())
+                if not available:
                     _LOGGER.error("No AI agents available")
                     return {"error": "No AI agents configured"}
-                provider = available_providers[0]
-                _LOGGER.debug(f"Using fallback provider: {provider}")
+                entry_id = available[0]
+                _LOGGER.debug("Using fallback entry: %s", entry_id)
 
-            agent = hass.data[DOMAIN]["agents"][provider]
+            agent = hass.data[DOMAIN]["agents"][entry_id]
 
             # Parse dashboard config if it's a string
             dashboard_config = call.data.get("dashboard_config", {})
@@ -489,46 +549,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Error updating dashboard: {e}")
             return {"error": str(e)}
 
-    # Register services
-    hass.services.async_register(DOMAIN, "query", async_handle_query)
-    hass.services.async_register(
-        DOMAIN, "create_automation", async_handle_create_automation
-    )
-    hass.services.async_register(
-        DOMAIN, "save_prompt_history", async_handle_save_prompt_history
-    )
-    hass.services.async_register(
-        DOMAIN, "load_prompt_history", async_handle_load_prompt_history
-    )
-    hass.services.async_register(
-        DOMAIN, "save_system_prompt_settings", async_handle_save_system_prompt_settings
-    )
-    hass.services.async_register(
-        DOMAIN, "load_system_prompt_settings", async_handle_load_system_prompt_settings
-    )
-    hass.services.async_register(
-        DOMAIN, "save_chat_history", async_handle_save_chat_history
-    )
-    hass.services.async_register(
-        DOMAIN, "load_chat_history", async_handle_load_chat_history
-    )
-    hass.services.async_register(
-        DOMAIN,
-        "get_configured_providers",
-        async_handle_get_configured_providers,
-    )
-    hass.services.async_register(
-        DOMAIN, "create_dashboard", async_handle_create_dashboard
-    )
-    hass.services.async_register(
-        DOMAIN, "update_dashboard", async_handle_update_dashboard
-    )
+    # Register services only for the first entry (avoid duplicate registration with multiple entries)
+    if len(hass.data[DOMAIN]["agents"]) == 1:
+        hass.services.async_register(DOMAIN, "query", async_handle_query)
+        hass.services.async_register(
+            DOMAIN, "create_automation", async_handle_create_automation
+        )
+        hass.services.async_register(
+            DOMAIN, "update_automation", async_handle_update_automation
+        )
+        hass.services.async_register(
+            DOMAIN, "save_prompt_history", async_handle_save_prompt_history
+        )
+        hass.services.async_register(
+            DOMAIN, "load_prompt_history", async_handle_load_prompt_history
+        )
+        hass.services.async_register(
+            DOMAIN, "save_system_prompt_settings", async_handle_save_system_prompt_settings
+        )
+        hass.services.async_register(
+            DOMAIN, "load_system_prompt_settings", async_handle_load_system_prompt_settings
+        )
+        hass.services.async_register(
+            DOMAIN, "save_chat_history", async_handle_save_chat_history
+        )
+        hass.services.async_register(
+            DOMAIN, "load_chat_history", async_handle_load_chat_history
+        )
+        hass.services.async_register(
+            DOMAIN,
+            "get_configured_providers",
+            async_handle_get_configured_providers,
+        )
+        hass.services.async_register(
+            DOMAIN, "create_dashboard", async_handle_create_dashboard
+        )
+        hass.services.async_register(
+            DOMAIN, "update_dashboard", async_handle_update_dashboard
+        )
 
-    # Register WebSocket command for provider list (frontend uses this if service not found)
-    try:
-        websocket_api.async_register_command(hass, _ws_get_configured_providers)
-    except ValueError:
-        pass  # already registered (multiple config entries)
+        # Register WebSocket command for provider list (frontend uses this if service not found)
+        try:
+            websocket_api.async_register_command(hass, _ws_get_configured_providers)
+        except ValueError:
+            pass  # already registered (multiple config entries)
+    else:
+        _LOGGER.debug("Services already registered by first entry, skipping")
 
     # Register static path for frontend
     await hass.http.async_register_static_paths(
@@ -556,7 +622,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 sidebar_title="AI Agent HA",
                 sidebar_icon="mdi:robot",
                 frontend_url_path=panel_name,
-                require_admin=False,
+                require_admin=True,
                 config={
                     "_panel_custom": {
                         "name": "ai_agent_ha-panel",
@@ -577,12 +643,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if DOMAIN not in hass.data:
         return True
 
-    provider = entry.data.get("ai_provider")
-    if provider:
-        hass.data[DOMAIN]["agents"].pop(provider, None)
-        hass.data[DOMAIN]["configs"].pop(provider, None)
-        hass.data[DOMAIN].get("entry_titles", {}).pop(provider, None)
-        _LOGGER.debug("Unloaded provider: %s", provider)
+    entry_id = entry.entry_id
+    agent = hass.data[DOMAIN]["agents"].pop(entry_id, None)
+    if agent and hasattr(agent, "async_close"):
+        try:
+            await agent.async_close()
+        except Exception as e:
+            _LOGGER.debug("Error closing agent session: %s", e)
+    hass.data[DOMAIN]["configs"].pop(entry_id, None)
+    hass.data[DOMAIN].get("entry_titles", {}).pop(entry_id, None)
+    _LOGGER.debug("Unloaded entry: %s", entry_id)
 
     # Only remove services and panel when no agents left (last entry unloaded)
     if not hass.data[DOMAIN].get("agents"):
@@ -596,6 +666,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         hass.services.async_remove(DOMAIN, "query")
         hass.services.async_remove(DOMAIN, "create_automation")
+        hass.services.async_remove(DOMAIN, "update_automation")
         hass.services.async_remove(DOMAIN, "save_prompt_history")
         hass.services.async_remove(DOMAIN, "load_prompt_history")
         hass.services.async_remove(DOMAIN, "save_system_prompt_settings")

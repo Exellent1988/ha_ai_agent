@@ -3,8 +3,12 @@ import {
   html,
   css,
 } from "https://unpkg.com/lit-element@2.4.0/lit-element.js?module";
+import { unsafeHTML } from "https://unpkg.com/lit-html@1.4.1/directives/unsafe-html.js?module";
 
-console.log("AI Agent HA Panel loading..."); // Debug log
+const DEBUG = false;
+function dbg(...args) {
+  if (DEBUG) console.debug("[AI Agent HA]", ...args);
+}
 
 const PROVIDERS = {
   openai: "OpenAI",
@@ -14,12 +18,60 @@ const PROVIDERS = {
   anthropic: "Anthropic",
   alter: "Alter",
   zai: "z.ai",
-  local: "Local Model",
   ollama: "Ollama (lokal)",
 };
 
 // Frontend fallback timeout (ms) – only used if no response event arrives; 5 min for local/slow models
 const FRONTEND_REQUEST_TIMEOUT_MS = 300000;
+
+/** Escape HTML to prevent XSS; then apply minimal Markdown for assistant messages. */
+function markdownToHtml(text) {
+  if (typeof text !== "string") return "";
+  const escape = (s) =>
+    String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  let out = escape(text);
+  // Code blocks (```...```) – restore after so content stays escaped
+  const codeBlocks = [];
+  out = out.replace(/```([\s\S]*?)```/g, (_, code) => {
+    codeBlocks.push(code);
+    return "```CODE_BLOCK_" + (codeBlocks.length - 1) + "```";
+  });
+  // Inline `code`
+  const inlineCodes = [];
+  out = out.replace(/`([^`]+)`/g, (_, code) => {
+    inlineCodes.push(code);
+    return "`INLINE_CODE_" + (inlineCodes.length - 1) + "`";
+  });
+  // Bold **text**
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  // Italic *text*
+  out = out.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  // Links [text](url) – only allow http/https/# hrefs
+  out = out.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
+    (_, t, u) => '<a href="' + escape(u) + '" target="_blank" rel="noopener noreferrer">' + t + "</a>"
+  );
+  out = out.replace(
+    /\[([^\]]+)\]\((#[^)]*)\)/g,
+    (_, t, u) => '<a href="' + escape(u) + '">' + t + "</a>"
+  );
+  // Newlines
+  out = out.replace(/\n/g, "<br>");
+  // Restore inline code
+  inlineCodes.forEach((c, i) => {
+    out = out.replace("`INLINE_CODE_" + i + "`", "<code>" + c + "</code>");
+  });
+  // Restore code blocks
+  codeBlocks.forEach((c, i) => {
+    const block = "<pre><code>" + c.replace(/<br>/g, "\n").trim() + "</code></pre>";
+    out = out.replace("```CODE_BLOCK_" + i + "```", block);
+  });
+  return out;
+}
 
 class AiAgentHaPanel extends LitElement {
   static get properties() {
@@ -258,6 +310,31 @@ class AiAgentHaPanel extends LitElement {
         background: var(--secondary-background-color);
         margin-right: auto;
         border-bottom-left-radius: 4px;
+      }
+      .assistant-message pre {
+        background: rgba(0, 0, 0, 0.06);
+        padding: 10px 12px;
+        border-radius: 8px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        margin: 8px 0;
+      }
+      .assistant-message code {
+        background: rgba(0, 0, 0, 0.08);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.92em;
+      }
+      .assistant-message pre code {
+        background: none;
+        padding: 0;
+      }
+      .assistant-message a {
+        color: var(--primary-color);
+        text-decoration: none;
+      }
+      .assistant-message a:hover {
+        text-decoration: underline;
       }
       .input-container {
         position: relative;
@@ -684,7 +761,7 @@ class AiAgentHaPanel extends LitElement {
     this._debugInfo = null;
     this._lastDebugInfo = null;
     this._chatHistoryLoaded = false;
-    console.debug("AI Agent HA Panel constructor called");
+    dbg("AI Agent HA Panel constructor called");
   }
 
   _getRandomPrompts() {
@@ -695,24 +772,29 @@ class AiAgentHaPanel extends LitElement {
 
   async connectedCallback() {
     super.connectedCallback();
-    console.debug("AI Agent HA Panel connected");
+    dbg("AI Agent HA Panel connected");
     if (this.hass && !this._eventSubscriptionSetup) {
       this._eventSubscriptionSetup = true;
       this.hass.connection.subscribeEvents(
         (event) => this._handleLlamaResponse(event),
         'ai_agent_ha_response'
       );
-      console.debug("Event subscription set up in connectedCallback()");
+      this.hass.connection.subscribeEvents(
+        (event) => this._handleResponseChunk(event),
+        'ai_agent_ha_response_chunk'
+      );
+      dbg("Event subscription set up in connectedCallback()");
       // Load prompt history from Home Assistant storage
       await this._loadPromptHistory();
     }
 
-    // Close dropdown when clicking outside
-    document.addEventListener('click', (e) => {
-      if (!this.shadowRoot.querySelector('.provider-selector')?.contains(e.target)) {
+    // Close dropdown when clicking outside (bound so we can remove it on disconnect)
+    this._boundClickHandler = (e) => {
+      if (!this.shadowRoot?.querySelector('.provider-selector')?.contains(e.target)) {
         this._showProviderDropdown = false;
       }
-    });
+    };
+    document.addEventListener('click', this._boundClickHandler);
 
     // Reload chat history when tab becomes visible again (e.g. after switching tabs)
     this._boundVisibilityHandler = () => this._onVisibilityChange();
@@ -721,6 +803,10 @@ class AiAgentHaPanel extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    if (this._boundClickHandler) {
+      document.removeEventListener('click', this._boundClickHandler);
+      this._boundClickHandler = null;
+    }
     if (this._boundVisibilityHandler) {
       document.removeEventListener('visibilitychange', this._boundVisibilityHandler);
     }
@@ -736,7 +822,7 @@ class AiAgentHaPanel extends LitElement {
   }
 
   async updated(changedProps) {
-    console.debug("Updated called with:", changedProps);
+    dbg("Updated called with:", changedProps);
 
     // Set up event subscription when hass becomes available
     if (changedProps.has('hass') && this.hass && !this._eventSubscriptionSetup) {
@@ -745,7 +831,11 @@ class AiAgentHaPanel extends LitElement {
         (event) => this._handleLlamaResponse(event),
         'ai_agent_ha_response'
       );
-      console.debug("Event subscription set up in updated()");
+      this.hass.connection.subscribeEvents(
+        (event) => this._handleResponseChunk(event),
+        'ai_agent_ha_response_chunk'
+      );
+      dbg("Event subscription set up in updated()");
     }
 
     // Load providers when hass becomes available
@@ -812,8 +902,12 @@ class AiAgentHaPanel extends LitElement {
             providers = aiAgentEntries
               .map(entry => {
                 const provider = this._resolveProviderFromEntry(entry);
-                if (!provider) return null;
-                return { value: provider, label: PROVIDERS[provider] || provider };
+                if (!provider || !entry.entry_id) return null;
+                const model = (entry.data?.models || {})[provider] || '';
+                const label = model
+                  ? `${PROVIDERS[provider] || provider} - ${model}`
+                  : (PROVIDERS[provider] || provider);
+                return { value: entry.entry_id, label };
               })
               .filter(Boolean);
           }
@@ -822,7 +916,7 @@ class AiAgentHaPanel extends LitElement {
 
       if (providers.length > 0) {
         this._availableProviders = providers;
-        console.debug("Available AI providers:", this._availableProviders);
+        dbg("Available AI providers:", this._availableProviders);
       } else {
         this._availableProviders = [];
       }
@@ -845,16 +939,16 @@ class AiAgentHaPanel extends LitElement {
     return html`
       <div class="prompts-section">
         <div class="prompts-header">
-          <span>Quick Actions</span>
+          <span>Schnellaktionen</span>
           <div style="display: flex; gap: 12px;">
             <div class="prompts-toggle" @click=${() => this._togglePredefinedPrompts()}>
               <ha-icon icon="${this._showPredefinedPrompts ? 'mdi:chevron-up' : 'mdi:chevron-down'}"></ha-icon>
-              <span>Suggestions</span>
+              <span>Vorschläge</span>
             </div>
             ${this._promptHistory.length > 0 ? html`
               <div class="prompts-toggle" @click=${() => this._togglePromptHistory()}>
                 <ha-icon icon="${this._showPromptHistory ? 'mdi:chevron-up' : 'mdi:chevron-down'}"></ha-icon>
-                <span>Recent</span>
+                <span>Zuletzt</span>
               </div>
             ` : ''}
           </div>
@@ -944,27 +1038,27 @@ class AiAgentHaPanel extends LitElement {
 
   async _loadPromptHistory() {
     if (!this.hass) {
-      console.debug('Hass not available, skipping prompt history load');
+      dbg('Hass not available, skipping prompt history load');
       return;
     }
 
-    console.debug('Loading prompt history...');
+    dbg('Loading prompt history...');
     try {
       const result = await this.hass.callService('ai_agent_ha', 'load_prompt_history', {
         provider: this._selectedProvider
       });
-      console.debug('Prompt history service result:', result);
+      dbg('Prompt history service result:', result);
 
       if (result && result.response && result.response.history) {
         this._promptHistory = result.response.history;
-        console.debug('Loaded prompt history from service:', this._promptHistory);
+        dbg('Loaded prompt history from service:', this._promptHistory);
         this.requestUpdate();
       } else if (result && result.history) {
         this._promptHistory = result.history;
-        console.debug('Loaded prompt history from service (direct):', this._promptHistory);
+        dbg('Loaded prompt history from service (direct):', this._promptHistory);
         this.requestUpdate();
       } else {
-        console.debug('No prompt history returned from service, checking localStorage');
+        dbg('No prompt history returned from service, checking localStorage');
         // Fallback to localStorage if service returns no data
         this._loadFromLocalStorage();
       }
@@ -983,10 +1077,10 @@ class AiAgentHaPanel extends LitElement {
         const saved = parsedList.history && parsedList.provider === this._selectedProvider ? parsedList.history : null;
         if (saved) {
           this._promptHistory = JSON.parse(saved);
-          console.debug('Loaded prompt history from localStorage:', this._promptHistory);
+          dbg('Loaded prompt history from localStorage:', this._promptHistory);
           this.requestUpdate();
         } else {
-          console.debug('No prompt history in localStorage');
+          dbg('No prompt history in localStorage');
           this._promptHistory = [];
         }
       }
@@ -998,18 +1092,18 @@ class AiAgentHaPanel extends LitElement {
 
   async _savePromptHistory() {
     if (!this.hass) {
-      console.debug('Hass not available, saving to localStorage only');
+      dbg('Hass not available, saving to localStorage only');
       this._saveToLocalStorage();
       return;
     }
 
-    console.debug('Saving prompt history:', this._promptHistory);
+    dbg('Saving prompt history:', this._promptHistory);
     try {
       const result = await this.hass.callService('ai_agent_ha', 'save_prompt_history', {
         history: this._promptHistory,
         provider: this._selectedProvider
       });
-      console.debug('Save prompt history result:', result);
+      dbg('Save prompt history result:', result);
 
       // Also save to localStorage as backup
       this._saveToLocalStorage();
@@ -1027,19 +1121,19 @@ class AiAgentHaPanel extends LitElement {
         history: JSON.stringify(this._promptHistory)
       }
       localStorage.setItem('ai_agent_ha_prompt_history', JSON.stringify(data));
-      console.debug('Saved prompt history to localStorage');
+      dbg('Saved prompt history to localStorage');
     } catch (e) {
       console.error('Error saving to localStorage:', e);
     }
   }
 
   render() {
-    console.debug("Rendering with state:", {
+    dbg("Rendering with state:", {
       messages: this._messages,
       isLoading: this._isLoading,
       error: this._error
     });
-    console.debug("Messages array:", this._messages);
+    dbg("Messages array:", this._messages);
 
     return html`
       <div class="header">
@@ -1056,7 +1150,7 @@ class AiAgentHaPanel extends LitElement {
             title="${this._messages.length ? 'Verlauf leeren – aktuell ' + this._messages.length + ' Nachrichten im Kontext' : 'Verlauf leeren'}"
           >
             <ha-icon icon="mdi:delete-sweep"></ha-icon>
-            <span>Clear Chat${this._messages.length ? ' (' + this._messages.length + ')' : ''}</span>
+            <span>Verlauf leeren${this._messages.length ? ' (' + this._messages.length + ')' : ''}</span>
           </button>
         </div>
       </div>
@@ -1082,7 +1176,7 @@ class AiAgentHaPanel extends LitElement {
           ${this._messages.length > 0 ? html`
             <div class="verlauf-hint" title="Anzahl Nachrichten, die als Kontext mitgeschickt werden. Bei vielen Nachrichten 'Clear Chat' nutzen, um frisch zu starten.">
               Verlauf: ${this._messages.length} Nachricht${this._messages.length !== 1 ? 'en' : ''} im Kontext
-              ${this._messages.length >= 6 ? html` – <strong>Clear Chat</strong> startet frisch` : ''}
+              ${this._messages.length >= 6 ? html` – <strong>Verlauf leeren</strong> startet frisch` : ''}
             </div>
           ` : ''}
           ${this._renderPromptsSection()}
@@ -1123,7 +1217,7 @@ class AiAgentHaPanel extends LitElement {
                   .checked=${this._showThinking}
                   @change=${(e) => this._toggleShowThinking(e)}
                 />
-                Show thinking
+                Denkvorgang anzeigen
               </label>
 
               <ha-button
@@ -1156,9 +1250,13 @@ class AiAgentHaPanel extends LitElement {
         }
       } catch (_) {}
     }
+    const isAssistant = msg.type === "assistant";
+    const textContent = isAssistant && !automation && !dashboard
+      ? unsafeHTML(markdownToHtml(text))
+      : text;
     return html`
       <div class="message ${msg.type}-message">
-        ${text}
+        ${textContent}
         ${automation ? html`
           <div class="automation-suggestion">
             <div class="automation-title">${automation.alias}</div>
@@ -1223,13 +1321,13 @@ class AiAgentHaPanel extends LitElement {
 
   _toggleProviderDropdown() {
     this._showProviderDropdown = !this._showProviderDropdown;
-    console.log("Toggling provider dropdown:", this._showProviderDropdown);
+    dbg("Toggling provider dropdown:", this._showProviderDropdown);
     this.requestUpdate(); // Añade esta línea para forzar la actualización
   }
 
   async _selectProvider(provider) {
     this._selectedProvider = provider;
-    console.debug("Provider changed to:", provider);
+    dbg("Provider changed to:", provider);
     await this._loadPromptHistory();
     this.requestUpdate();
   }
@@ -1244,14 +1342,19 @@ class AiAgentHaPanel extends LitElement {
     const prompt = promptEl.value.trim();
     if (!prompt || this._isLoading) return;
 
-    console.debug("Sending message:", prompt);
-    console.debug("Sending message with provider:", this._selectedProvider);
+    dbg("Sending message:", prompt);
+    dbg("Sending message with provider:", this._selectedProvider);
 
     // Add to history
     await this._addToHistory(prompt);
 
-    // Add user message
-    this._messages = [...this._messages, { type: 'user', text: prompt }];
+    // Add user message and streaming placeholder (chunks will append to it when using Ollama)
+    this._currentRequestId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    this._messages = [
+      ...this._messages,
+      { type: 'user', text: prompt },
+      { type: 'assistant', text: '', streaming: true, requestId: this._currentRequestId }
+    ];
     promptEl.value = '';
     promptEl.style.height = 'auto';
     this._isLoading = true;
@@ -1270,6 +1373,10 @@ class AiAgentHaPanel extends LitElement {
         console.warn("Service call timeout - clearing loading state");
         this._isLoading = false;
         this._error = 'Request timed out. Please try again.';
+        const last = this._messages[this._messages.length - 1];
+        if (last && last.streaming) {
+          this._messages = this._messages.slice(0, -1);
+        }
         this._messages = [...this._messages, {
           type: 'assistant',
           text: 'Sorry, the request timed out. Please try again.'
@@ -1278,21 +1385,37 @@ class AiAgentHaPanel extends LitElement {
       }
     }, FRONTEND_REQUEST_TIMEOUT_MS);
 
-    console.debug("Calling ai_agent_ha service (response will arrive via event)");
+    dbg("Calling ai_agent_ha service (response will arrive via event)");
     this.hass.callService('ai_agent_ha', 'query', {
       prompt: prompt,
       provider: this._selectedProvider,
-      debug: this._showThinking
+      debug: this._showThinking,
+      request_id: this._currentRequestId
     }).catch((error) => {
       console.error("Error calling service:", error);
       this._clearLoadingState();
       this._error = error.message || 'An error occurred while processing your request';
+      const last = this._messages[this._messages.length - 1];
+      if (last && last.streaming) {
+        this._messages = this._messages.slice(0, -1);
+      }
       this._messages = [...this._messages, {
         type: 'assistant',
         text: `Error: ${this._error}`
       }];
       this.requestUpdate();
     });
+  }
+
+  _handleResponseChunk(event) {
+    const data = event.data || {};
+    if (data.request_id !== this._currentRequestId) return;
+    const last = this._messages[this._messages.length - 1];
+    if (!last || last.type !== 'assistant' || !last.streaming) return;
+    const chunk = data.chunk || '';
+    if (!chunk) return;
+    last.text = (last.text || '') + chunk;
+    this.requestUpdate();
   }
 
   _clearLoadingState() {
@@ -1304,7 +1427,7 @@ class AiAgentHaPanel extends LitElement {
   }
 
   _handleLlamaResponse(event) {
-    console.debug("Received llama response:", event);
+    dbg("Received llama response:", event);
     
     try {
       this._clearLoadingState();
@@ -1319,8 +1442,15 @@ class AiAgentHaPanel extends LitElement {
       if (last && last.type === 'assistant' && last.text && last.text.includes('request timed out')) {
         this._messages = this._messages.slice(0, -1);
       }
+      const requestId = event.data.request_id;
+      const isStreamingUpdate = last && last.type === 'assistant' && last.streaming === true &&
+        (requestId === undefined || requestId === last.requestId);
+
       // Check if the answer is empty
       if (!event.data.answer || event.data.answer.trim() === '') {
+        if (isStreamingUpdate) {
+          this._messages = this._messages.slice(0, -1);
+        }
         console.warn("AI agent returned empty response");
         this._messages = [
           ...this._messages,
@@ -1337,25 +1467,25 @@ class AiAgentHaPanel extends LitElement {
 
       // Check if the response contains an automation or dashboard suggestion
       try {
-        console.debug("Attempting to parse response as JSON:", event.data.answer);
+        dbg("Attempting to parse response as JSON:", event.data.answer);
         let jsonText = event.data.answer;
         
         // Try to extract JSON from mixed text+JSON responses
         const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
         if (jsonMatch && jsonMatch[0] !== jsonText.trim()) {
-          console.debug("Found JSON within mixed response, extracting:", jsonMatch[0]);
+          dbg("Found JSON within mixed response, extracting:", jsonMatch[0]);
           jsonText = jsonMatch[0];
         }
         
         const response = JSON.parse(jsonText);
-        console.debug("Parsed JSON response:", response);
+        dbg("Parsed JSON response:", response);
         
         if (response.request_type === 'automation_suggestion') {
-          console.debug("Found automation suggestion");
+          dbg("Found automation suggestion");
           message.automation = response.automation;
           message.text = response.message || 'I found an automation that might help you. Would you like me to create it?';
         } else if (response.request_type === 'dashboard_suggestion') {
-          console.debug("Found dashboard suggestion:", response.dashboard);
+          dbg("Found dashboard suggestion:", response.dashboard);
           message.dashboard = response.dashboard;
           message.text = response.message || 'I created a dashboard configuration for you. Would you like me to create it?';
         } else if (response.request_type === 'final_response') {
@@ -1371,15 +1501,25 @@ class AiAgentHaPanel extends LitElement {
         // If none of the above, keep the original event.data.answer as message.text
       } catch (e) {
         // Not a JSON response, treat as normal message
-        console.debug("Response is not JSON, using as-is:", event.data.answer);
-        console.debug("JSON parse error:", e);
+        dbg("Response is not JSON, using as-is:", event.data.answer);
+        dbg("JSON parse error:", e);
         // message.text is already set to event.data.answer
       }
 
-      console.debug("Adding message to UI:", message);
-      this._messages = [...this._messages, message];
+      if (isStreamingUpdate) {
+        const idx = this._messages.length - 1;
+        this._messages = [...this._messages];
+        this._messages[idx] = { ...message, streaming: false };
+      } else {
+        dbg("Adding message to UI:", message);
+        this._messages = [...this._messages, message];
+      }
     } else {
       this._error = event.data.error || 'An error occurred';
+      const last = this._messages[this._messages.length - 1];
+      if (last && last.type === 'assistant' && last.streaming) {
+        this._messages = this._messages.slice(0, -1);
+      }
       this._messages = [
         ...this._messages,
         { type: 'assistant', text: `Error: ${this._error}` }
@@ -1405,7 +1545,7 @@ class AiAgentHaPanel extends LitElement {
         automation: automation
       });
 
-      console.debug("Automation creation result:", result);
+      dbg("Automation creation result:", result);
 
       // The result should be an object with a message property
       if (result && result.message) {
@@ -1456,7 +1596,7 @@ class AiAgentHaPanel extends LitElement {
         dashboard_config: dashboard
       });
 
-      console.debug("Dashboard creation result:", result);
+      dbg("Dashboard creation result:", result);
 
       // The result should be an object with a message property
       if (result && result.message) {
@@ -1539,7 +1679,7 @@ class AiAgentHaPanel extends LitElement {
         this.requestUpdate();
       }
     } catch (e) {
-      console.debug('Could not load chat history:', e);
+      dbg('Could not load chat history:', e);
     }
   }
 
@@ -1666,4 +1806,4 @@ class AiAgentHaPanel extends LitElement {
 
 customElements.define("ai_agent_ha-panel", AiAgentHaPanel);
 
-console.log("AI Agent HA Panel registered");
+dbg("AI Agent HA Panel registered");

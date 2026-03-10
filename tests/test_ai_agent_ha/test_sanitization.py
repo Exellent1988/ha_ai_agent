@@ -1,81 +1,18 @@
 """Tests for the sanitization utility function."""
 
+import importlib.util
 import os
 import sys
 
 import pytest
 
-# Add the parent directory to the path for direct imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
-
-# Import the sanitization function directly without importing the full module
-# This avoids dependency on homeassistant which may not be installed
-def get_sanitize_function():
-    """Get the sanitize_for_logging function without importing full module."""
-    from typing import Any
-
-    def sanitize_for_logging(data: Any, mask: str = "***REDACTED***") -> Any:
-        """Sanitize sensitive data for safe logging.
-
-        Recursively masks sensitive fields like API keys, tokens, passwords, etc.
-        This prevents accidental exposure of credentials in debug logs.
-
-        Args:
-            data: The data structure to sanitize (dict, list, str, etc.)
-            mask: The string to use for masking sensitive values
-
-        Returns:
-            A sanitized copy of the data with sensitive fields masked
-        """
-        # Sensitive field patterns (case-insensitive)
-        sensitive_patterns = {
-            "token",
-            "key",
-            "password",
-            "secret",
-            "credential",
-            "auth",
-            "authorization",
-            "api_key",
-            "apikey",
-            "llama_token",
-            "openai_token",
-            "gemini_token",
-            "anthropic_token",
-            "openrouter_token",
-        }
-
-        if isinstance(data, dict):
-            sanitized = {}
-            for key, value in data.items():
-                # Check if key matches any sensitive pattern
-                key_lower = str(key).lower()
-                is_sensitive = any(
-                    pattern in key_lower for pattern in sensitive_patterns
-                )
-
-                if is_sensitive:
-                    sanitized[key] = mask
-                else:
-                    # Recursively sanitize nested structures
-                    sanitized[key] = sanitize_for_logging(value, mask)
-            return sanitized
-
-        elif isinstance(data, list):
-            return [sanitize_for_logging(item, mask) for item in data]
-
-        elif isinstance(data, tuple):
-            return tuple(sanitize_for_logging(item, mask) for item in data)
-
-        else:
-            # Primitive types (str, int, bool, etc.) - return as-is
-            return data
-
-    return sanitize_for_logging
-
-
-sanitize_for_logging = get_sanitize_function()
+# Load util module directly to avoid pulling in homeassistant/voluptuous
+_project_root = os.path.join(os.path.dirname(__file__), "..", "..")
+_util_path = os.path.join(_project_root, "custom_components", "ai_agent_ha", "util.py")
+_spec = importlib.util.spec_from_file_location("ai_agent_ha_util", _util_path)
+_util = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_util)
+sanitize_for_logging = _util.sanitize_for_logging
 
 
 class TestSanitization:

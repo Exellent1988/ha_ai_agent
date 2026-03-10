@@ -425,21 +425,21 @@ class TestAIAgent:
                 light_state if entity_id == "light.living_room" else None
             )
 
-            # Initialize conversation
-            agent.conversation_history = []
+            # Initialize conversation (per-user storage)
+            agent._user_conversations["default"] = []
 
-            # Simulate a query that triggers data request
+            # Simulate a query that triggers data request (use process_query; default user_id)
             try:
-                await agent.send_query("turn on lights")
+                await agent.process_query("turn on lights", user_id="default")
             except Exception:
                 # May fail due to mocking limitations, but that's ok
                 pass
 
             # Check that data was added with 'user' role, NOT 'system'
-            # Find the message with data in conversation history
+            conv = agent._get_conversation("default")
             data_messages = [
                 msg
-                for msg in agent.conversation_history
+                for msg in conv
                 if isinstance(msg.get("content"), str)
                 and '"data":' in msg.get("content", "")
             ]
@@ -454,7 +454,7 @@ class TestAIAgent:
                 # Verify system messages only contain actual system prompt, not data
                 system_messages = [
                     msg
-                    for msg in agent.conversation_history
+                    for msg in conv
                     if msg.get("role") == "system"
                 ]
 

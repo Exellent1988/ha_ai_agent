@@ -46,6 +46,14 @@ MAX_PROMPT_CHARS = 60000
 # Supported AI providers
 DEFAULT_AI_PROVIDER = "openai"
 
+# Service domains the AI is allowed to call (blocks homeassistant.restart, system_log, etc.)
+ALLOWED_SERVICE_DOMAINS = frozenset({
+    "light", "switch", "climate", "cover", "fan", "media_player",
+    "vacuum", "scene", "script", "automation", "input_boolean",
+    "input_number", "input_select", "input_text", "input_datetime",
+    "notify", "tts", "lock", "alarm_control_panel",
+})
+
 
 def normalize_url(url: str | None) -> str:
     """Fix common URL typos (e.g. http:: -> http://)."""

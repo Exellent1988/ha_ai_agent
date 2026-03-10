@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -22,8 +23,6 @@ import aiohttp
 from .agent import get_default_system_prompt_content_for_provider
 from .const import (
     CONF_LANGUAGE,
-    CONF_LOCAL_MODEL,
-    CONF_LOCAL_URL,
     CONF_OLLAMA_URL,
     CONF_REQUEST_TIMEOUT,
     CONF_SYSTEM_PROMPT,
@@ -44,7 +43,6 @@ PROVIDERS = {
     "anthropic": "Anthropic (Claude)",
     "alter": "Alter",
     "zai": "z.ai",
-    "local": "Local Model",
     "ollama": "Ollama (lokal)",
 }
 
@@ -57,7 +55,6 @@ TOKEN_FIELD_NAMES = {
     "alter": "alter_token",
     "zai": "zai_token",
     "zai_endpoint": "zai_endpoint",
-    "local": CONF_LOCAL_URL,  # For local models, we use URL instead of token
     "ollama": CONF_OLLAMA_URL,  # Ollama base URL (e.g. http://localhost:11434)
 }
 
@@ -70,7 +67,6 @@ TOKEN_LABELS = {
     "alter": "Alter API Key",
     "zai": "z.ai API Key",
     "zai_endpoint": "z.ai API Endpoint Type",
-    "local": "Local API URL (e.g., http://localhost:11434/api/generate)",
     "ollama": "Ollama Server URL (z.B. http://localhost:11434)",
 }
 
@@ -82,7 +78,6 @@ DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-5-20250929",
     "alter": "",  # User enters custom model
     "zai": "glm-4.7",  # Z.ai's latest flagship model
-    "local": "llama3.2",  # Updated to use llama3.2 as default
     "ollama": "llama3.2",  # Default Ollama model
 }
 
@@ -156,16 +151,6 @@ AVAILABLE_MODELS = {
         "glm-4.5-airx",
         "glm-4.5-flash",
         "glm-4-32b-0414-128k",
-        "Custom...",
-    ],
-    # For local models, provide common Ollama models with llama3.2 as the default
-    "local": [
-        "llama3.2",
-        "llama3",
-        "llama3.1",
-        "mistral",
-        "mixtral",
-        "deepseek-coder",
         "Custom...",
     ],
     # Ollama - models can be discovered dynamically via /api/tags
@@ -272,8 +257,8 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
         errors = {}
 
         if user_input is not None:
-            # Check if this provider is already configured
-            await self.async_set_unique_id(f"ai_agent_ha_{user_input['ai_provider']}")
+            # Unique ID per entry so multiple entries per provider (e.g. several Ollama configs) are allowed
+            await self.async_set_unique_id(f"ai_agent_ha_{uuid.uuid4().hex[:12]}")
             self._abort_if_unique_id_configured()
 
             self.config_data = {"ai_provider": user_input["ai_provider"]}
@@ -314,7 +299,8 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     errors[token_field] = "required"
                     raise InvalidApiKey
 
-                # For ollama, validate URL format
+                # For ollama, validate URL format (2-Pass: URL first, then model from that URL)
+                ollama_url_just_stored = False
                 if provider == "ollama":
                     from .const import normalize_url
 
@@ -323,7 +309,12 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                     if not token_value.startswith(("http://", "https://")):
                         errors[token_field] = "invalid_url"
                     else:
-                        self.config_data[token_field] = token_value
+                        # First pass: only URL submitted -> store and show model step
+                        if not self.config_data.get(CONF_OLLAMA_URL):
+                            self.config_data[token_field] = token_value
+                            ollama_url_just_stored = True
+                        else:
+                            self.config_data[token_field] = token_value
 
                 if not errors:
                     if provider != "ollama":
@@ -332,44 +323,51 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                         token_value = normalize_url(token_value)
                         self.config_data[token_field] = token_value
 
-                    # For z.ai, store endpoint type
-                    if provider == "zai":
-                        endpoint_type = user_input.get("zai_endpoint", "general")
-                        self.config_data["zai_endpoint"] = endpoint_type
-
-                    # Add model configuration if provided
-                    selected_model = user_input.get("model")
-                    custom_model = user_input.get("custom_model")
-
-                    _LOGGER.debug(
-                        f"Config flow - Provider: {provider}, Selected model: {selected_model}, Custom model: {custom_model}"
-                    )
-
-                    # Initialize models dict if it doesn't exist
-                    if "models" not in self.config_data:
-                        self.config_data["models"] = {}
-
-                    if custom_model and custom_model.strip():
-                        # Use custom model if provided and not empty
-                        self.config_data["models"][provider] = custom_model.strip()
-                    elif selected_model and selected_model != "Custom...":
-                        # Use selected model if it's not the "Custom..." option
-                        self.config_data["models"][provider] = selected_model
+                    # Ollama 2-Pass: after storing URL, show model form (do not create entry yet)
+                    if ollama_url_just_stored:
+                        pass  # fall through to show model form below
                     else:
-                        # For local, alter, ollama and zai providers, allow empty model name
-                        if provider in ("local", "alter", "ollama", "zai"):
-                            self.config_data["models"][provider] = ""
-                        else:
-                            # Fallback to default model for other providers
-                            self.config_data["models"][provider] = default_model
+                        # For z.ai, store endpoint type
+                        if provider == "zai":
+                            endpoint_type = user_input.get("zai_endpoint", "general")
+                            self.config_data["zai_endpoint"] = endpoint_type
 
-                    _store_system_prompt_from_input(
-                        self.config_data, user_input
-                    )
-                    return self.async_create_entry(
-                        title=f"AI Agent HA ({PROVIDERS[provider]})",
-                        data=self.config_data,
-                    )
+                        # Add model configuration if provided
+                        selected_model = user_input.get("model")
+                        custom_model = user_input.get("custom_model")
+
+                        _LOGGER.debug(
+                            "Config flow - Provider: %s, Selected model: %s, Custom model: %s",
+                            provider,
+                            selected_model,
+                            custom_model,
+                        )
+
+                        # Initialize models dict if it doesn't exist
+                        if "models" not in self.config_data:
+                            self.config_data["models"] = {}
+
+                        if custom_model and custom_model.strip():
+                            # Use custom model if provided and not empty
+                            self.config_data["models"][provider] = custom_model.strip()
+                        elif selected_model and selected_model != "Custom...":
+                            # Use selected model if it's not the "Custom..." option
+                            self.config_data["models"][provider] = selected_model
+                        else:
+                            # For local, alter, ollama and zai providers, allow empty model name
+                            if provider in ("alter", "ollama", "zai"):
+                                self.config_data["models"][provider] = ""
+                            else:
+                                # Fallback to default model for other providers
+                                self.config_data["models"][provider] = default_model
+
+                        _store_system_prompt_from_input(
+                            self.config_data, user_input
+                        )
+                        return self.async_create_entry(
+                            title=f"AI Agent HA ({PROVIDERS[provider]})",
+                            data=self.config_data,
+                        )
             except InvalidApiKey:
                 errors["base"] = "invalid_api_key"
             except Exception:  # pylint: disable=broad-except
@@ -410,53 +408,33 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
                 },
             )
 
-        if provider == "local":
-            # For local provider, we need both URL and optional model name
-            # Try to fetch models from default Ollama URL (localhost)
-            default_base = _ollama_base_url_from_local_url(
-                "http://localhost:11434/api/generate"
-            )
-            discovered = (
-                await fetch_ollama_models(default_base)
-                if default_base
-                else []
-            )
-            model_options = (
-                discovered + ["Custom..."] if discovered else AVAILABLE_MODELS["local"]
-            )
-            schema_dict = {
-                vol.Required(CONF_LOCAL_URL): TextSelector(
-                    TextSelectorConfig(type="text")
-                ),
-            }
-            schema_dict[vol.Optional("model", default="Custom...")] = SelectSelector(
-                SelectSelectorConfig(options=model_options)
-            )
-            schema_dict[vol.Optional("custom_model")] = TextSelector(
-                TextSelectorConfig(type="text")
-            )
-            _add_system_prompt_fields(schema_dict)
-
-            return self.async_show_form(
-                step_id="configure",
-                data_schema=vol.Schema(schema_dict),
-                errors=errors,
-                description_placeholders={
-                    "token_label": "Local API URL",
-                    "provider": PROVIDERS[provider],
-                },
-            )
-
         if provider == "ollama":
-            # For Ollama: URL + model selection (try to discover models from server)
-            base_url = DEFAULT_OLLAMA_URL
+            # Ollama 2-Pass: first URL only, then model from fetched list for that URL
+            base_url = self.config_data.get(CONF_OLLAMA_URL) or DEFAULT_OLLAMA_URL
+            if not self.config_data.get(CONF_OLLAMA_URL):
+                # Pass 1: show only URL field
+                schema_dict = {
+                    vol.Required(
+                        CONF_OLLAMA_URL, default=DEFAULT_OLLAMA_URL
+                    ): TextSelector(TextSelectorConfig(type="text")),
+                }
+                return self.async_show_form(
+                    step_id="configure",
+                    data_schema=vol.Schema(schema_dict),
+                    errors=errors,
+                    description_placeholders={
+                        "token_label": "Ollama Server URL",
+                        "provider": PROVIDERS[provider],
+                    },
+                )
+            # Pass 2: fetch models from user's URL, show model dropdown
             discovered = await fetch_ollama_models(base_url)
             model_options = (
                 discovered + ["Custom..."] if discovered else AVAILABLE_MODELS["ollama"]
             )
             schema_dict = {
                 vol.Required(
-                    CONF_OLLAMA_URL, default=DEFAULT_OLLAMA_URL
+                    CONF_OLLAMA_URL, default=base_url
                 ): TextSelector(TextSelectorConfig(type="text")),
             }
             schema_dict[
@@ -579,7 +557,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 token_value = user_input.get(token_field)
                 if not token_value:
                     errors[token_field] = "required"
-                elif provider in ("ollama", "local"):
+                elif provider == "ollama":
                     from .const import normalize_url
 
                     token_value = normalize_url(token_value).strip().rstrip("/")
@@ -612,7 +590,7 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                         updated_data["models"][provider] = selected_model
                     else:
                         # For local, alter, ollama and zai providers, allow empty model name
-                        if provider in ("local", "alter", "ollama", "zai"):
+                        if provider in ("alter", "ollama", "zai"):
                             updated_data["models"][provider] = ""
                         else:
                             # Ensure we keep the current model or use default for other providers
@@ -687,50 +665,6 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 errors=errors,
                 description_placeholders={
                     "token_label": token_label,
-                    "provider": PROVIDERS[provider],
-                },
-            )
-
-        if provider == "local":
-            # For local provider, we need both URL and optional model name
-            current_url = self.config_entry.data.get(CONF_LOCAL_URL, "")
-            base_url = _ollama_base_url_from_local_url(current_url)
-            discovered = (
-                await fetch_ollama_models(base_url) if base_url else []
-            )
-            model_options = (
-                discovered + ["Custom..."] if discovered else AVAILABLE_MODELS["local"]
-            )
-            schema_dict = {
-                vol.Required(CONF_LOCAL_URL, default=current_url): TextSelector(
-                    TextSelectorConfig(type="text")
-                ),
-            }
-            schema_dict[
-                vol.Optional(
-                    "model", default=current_model if current_model else "Custom..."
-                )
-            ] = SelectSelector(SelectSelectorConfig(options=model_options))
-            schema_dict[vol.Optional("custom_model")] = TextSelector(
-                TextSelectorConfig(type="text")
-            )
-            _default_prompt = self.config_entry.data.get(CONF_SYSTEM_PROMPT, "") or get_default_system_prompt_content_for_provider(provider)
-            _add_system_prompt_fields(
-                schema_dict,
-                default_lang=self.config_entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
-                default_prompt=_default_prompt,
-            )
-            _add_request_timeout_field(
-                schema_dict,
-                self.config_entry.data.get(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT),
-            )
-
-            return self.async_show_form(
-                step_id="configure_options",
-                data_schema=vol.Schema(schema_dict),
-                errors=errors,
-                description_placeholders={
-                    "token_label": "Local API URL",
                     "provider": PROVIDERS[provider],
                 },
             )
