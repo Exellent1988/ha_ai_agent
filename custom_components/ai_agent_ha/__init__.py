@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 
 import voluptuous as vol
+from homeassistant.components import websocket_api
 from homeassistant.components.frontend import async_register_built_in_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import callback
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
@@ -28,6 +30,28 @@ _LOGGER = logging.getLogger(__name__)
 
 # Config schema - this integration only supports config entries
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ai_agent_ha/providers"})
+@callback
+def _ws_get_configured_providers(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """WebSocket handler: return list of configured providers for the panel."""
+    providers = []
+    if DOMAIN in hass.data and hass.data[DOMAIN].get("agents"):
+        titles = hass.data[DOMAIN].get("entry_titles") or {}
+        providers = [
+            {
+                "value": pid,
+                "label": titles.get(pid) or PROVIDER_LABELS.get(pid, pid),
+            }
+            for pid in hass.data[DOMAIN]["agents"].keys()
+        ]
+    connection.send_result(msg["id"], {"providers": providers})
+
 
 # Define service schema to accept a custom prompt
 SERVICE_SCHEMA = vol.Schema(
@@ -85,9 +109,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise ConfigEntryNotReady("Config entry missing required 'ai_provider' key")
 
         if DOMAIN not in hass.data:
-            hass.data[DOMAIN] = {"agents": {}, "configs": {}}
+            hass.data[DOMAIN] = {"agents": {}, "configs": {}, "entry_titles": {}}
 
         provider = config_data["ai_provider"]
+        hass.data[DOMAIN].setdefault("entry_titles", {})[provider] = entry.title
 
         # Validate provider
         if provider not in [
@@ -365,14 +390,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return {"error": str(e), "messages": []}
 
     async def async_handle_get_configured_providers(call):
-        """Return list of configured providers for the frontend (value + label)."""
+        """Return list of configured providers for the frontend (value + label from entry title)."""
         try:
             if DOMAIN not in hass.data or not hass.data[DOMAIN].get("agents"):
                 return {"providers": []}
+            titles = hass.data[DOMAIN].get("entry_titles") or {}
             providers = [
                 {
                     "value": provider_id,
-                    "label": PROVIDER_LABELS.get(provider_id, provider_id),
+                    "label": titles.get(provider_id) or PROVIDER_LABELS.get(provider_id, provider_id),
                 }
                 for provider_id in hass.data[DOMAIN]["agents"].keys()
             ]
@@ -498,6 +524,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "update_dashboard", async_handle_update_dashboard
     )
 
+    # Register WebSocket command for provider list (frontend uses this if service not found)
+    try:
+        websocket_api.async_register_command(hass, _ws_get_configured_providers)
+    except ValueError:
+        pass  # already registered (multiple config entries)
+
     # Register static path for frontend
     await hass.http.async_register_static_paths(
         [
@@ -509,30 +541,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ]
     )
 
-    # Panel registration with proper error handling
+    # Panel registration only once (first entry); avoid "Overwriting panel" when multiple entries
     panel_name = "ai_agent_ha"
     try:
-        if await _panel_exists(hass, panel_name):
+        if len(hass.data[DOMAIN]["agents"]) > 1:
+            _LOGGER.debug("Panel already registered by first entry, skipping")
+        elif await _panel_exists(hass, panel_name):
             _LOGGER.debug("AI Agent HA panel already exists, skipping registration")
-            return True
-
-        _LOGGER.debug("Registering AI Agent HA panel")
-        async_register_built_in_panel(
-            hass,
-            component_name="custom",
-            sidebar_title="AI Agent HA",
-            sidebar_icon="mdi:robot",
-            frontend_url_path=panel_name,
-            require_admin=False,
-            config={
-                "_panel_custom": {
-                    "name": "ai_agent_ha-panel",
-                    "module_url": "/frontend/ai_agent_ha/ai_agent_ha-panel.js",
-                    "embed_iframe": False,
-                }
-            },
-        )
-        _LOGGER.debug("AI Agent HA panel registered successfully")
+        else:
+            _LOGGER.debug("Registering AI Agent HA panel")
+            async_register_built_in_panel(
+                hass,
+                component_name="custom",
+                sidebar_title="AI Agent HA",
+                sidebar_icon="mdi:robot",
+                frontend_url_path=panel_name,
+                require_admin=False,
+                config={
+                    "_panel_custom": {
+                        "name": "ai_agent_ha-panel",
+                        "module_url": "/frontend/ai_agent_ha/ai_agent_ha-panel.js",
+                        "embed_iframe": False,
+                    }
+                },
+            )
+            _LOGGER.debug("AI Agent HA panel registered successfully")
     except Exception as e:
         _LOGGER.warning("Panel registration error: %s", str(e))
 
@@ -540,30 +573,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    if await _panel_exists(hass, "ai_agent_ha"):
+    """Unload a config entry. Only remove this entry's agent; remove services/panel only when no entries remain."""
+    if DOMAIN not in hass.data:
+        return True
+
+    provider = entry.data.get("ai_provider")
+    if provider:
+        hass.data[DOMAIN]["agents"].pop(provider, None)
+        hass.data[DOMAIN]["configs"].pop(provider, None)
+        hass.data[DOMAIN].get("entry_titles", {}).pop(provider, None)
+        _LOGGER.debug("Unloaded provider: %s", provider)
+
+    # Only remove services and panel when no agents left (last entry unloaded)
+    if not hass.data[DOMAIN].get("agents"):
         try:
             from homeassistant.components.frontend import async_remove_panel
 
             async_remove_panel(hass, "ai_agent_ha")
-            _LOGGER.debug("AI Agent HA panel removed successfully")
+            _LOGGER.debug("AI Agent HA panel removed")
         except Exception as e:
             _LOGGER.debug("Error removing panel: %s", str(e))
 
-    # Remove services
-    hass.services.async_remove(DOMAIN, "query")
-    hass.services.async_remove(DOMAIN, "create_automation")
-    hass.services.async_remove(DOMAIN, "save_prompt_history")
-    hass.services.async_remove(DOMAIN, "load_prompt_history")
-    hass.services.async_remove(DOMAIN, "save_system_prompt_settings")
-    hass.services.async_remove(DOMAIN, "load_system_prompt_settings")
-    hass.services.async_remove(DOMAIN, "save_chat_history")
-    hass.services.async_remove(DOMAIN, "load_chat_history")
-    hass.services.async_remove(DOMAIN, "get_configured_providers")
-    hass.services.async_remove(DOMAIN, "create_dashboard")
-    hass.services.async_remove(DOMAIN, "update_dashboard")
-    # Remove data
-    if DOMAIN in hass.data:
+        hass.services.async_remove(DOMAIN, "query")
+        hass.services.async_remove(DOMAIN, "create_automation")
+        hass.services.async_remove(DOMAIN, "save_prompt_history")
+        hass.services.async_remove(DOMAIN, "load_prompt_history")
+        hass.services.async_remove(DOMAIN, "save_system_prompt_settings")
+        hass.services.async_remove(DOMAIN, "load_system_prompt_settings")
+        hass.services.async_remove(DOMAIN, "save_chat_history")
+        hass.services.async_remove(DOMAIN, "load_chat_history")
+        hass.services.async_remove(DOMAIN, "get_configured_providers")
+        hass.services.async_remove(DOMAIN, "create_dashboard")
+        hass.services.async_remove(DOMAIN, "update_dashboard")
+
         hass.data.pop(DOMAIN)
 
     return True

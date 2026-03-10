@@ -727,10 +727,12 @@ class AiAgentHaPanel extends LitElement {
   }
 
   _onVisibilityChange() {
-    if (document.visibilityState === 'visible' && this.hass && this._selectedProvider) {
-      this._chatHistoryLoaded = false;
-      this._loadChatHistory();
-    }
+    if (document.visibilityState !== 'visible' || !this.hass) return;
+    this._chatHistoryLoaded = false;
+    this._loadChatHistory();
+    // Reload provider list when returning to the panel (e.g. after adding another integration)
+    this.providersLoaded = false;
+    this._loadProviders().then(() => this.requestUpdate());
   }
 
   async updated(changedProps) {
@@ -749,67 +751,7 @@ class AiAgentHaPanel extends LitElement {
     // Load providers when hass becomes available
     if (changedProps.has('hass') && this.hass && !this.providersLoaded) {
       this.providersLoaded = true;
-
-      try {
-        // Prefer backend service: list of configured providers (works after reinstall)
-        let serviceResult;
-        try {
-          const raw = await this.hass.callService(
-            'ai_agent_ha',
-            'get_configured_providers',
-            {},
-            {},
-            true
-          );
-          serviceResult = raw?.response !== undefined ? raw.response : raw;
-        } catch (_) {
-          serviceResult = null;
-        }
-        const fromService = serviceResult?.providers && Array.isArray(serviceResult.providers)
-          ? serviceResult.providers
-          : [];
-
-        if (fromService.length > 0) {
-          this._availableProviders = fromService;
-          console.debug("Available AI providers (from backend service):", this._availableProviders);
-        } else {
-          // Fallback: WebSocket config entries (e.g. if service not yet available)
-          const allEntries = await this.hass.callWS({ type: 'config_entries/get' });
-          const aiAgentEntries = (Array.isArray(allEntries) ? allEntries : []).filter(
-            entry => entry && entry.domain === 'ai_agent_ha'
-          );
-
-          if (aiAgentEntries.length > 0) {
-            const providers = aiAgentEntries
-              .map(entry => {
-                const provider = this._resolveProviderFromEntry(entry);
-                if (!provider) return null;
-                return {
-                  value: provider,
-                  label: PROVIDERS[provider] || provider
-                };
-              })
-              .filter(Boolean);
-            this._availableProviders = providers;
-            console.debug("Available AI providers (from config_entries):", this._availableProviders);
-          } else {
-            console.debug("No configured AI providers found (service and config_entries).");
-            this._availableProviders = [];
-          }
-        }
-
-        if (
-          (!this._selectedProvider || !this._availableProviders.find(p => p.value === this._selectedProvider)) &&
-          this._availableProviders.length > 0
-        ) {
-          this._selectedProvider = this._availableProviders[0].value;
-        }
-      } catch (error) {
-        console.error("Error loading AI providers:", error);
-        this._error = error.message || 'Failed to load AI provider configurations.';
-        this._availableProviders = [];
-      }
-      this.requestUpdate();
+      this._loadProviders().then(() => this.requestUpdate());
     }
 
     // Load prompt history and chat history when hass becomes available
@@ -832,6 +774,71 @@ class AiAgentHaPanel extends LitElement {
     if (changedProps.has('_messages') || changedProps.has('_isLoading')) {
       this._scrollToBottom();
     }
+  }
+
+  async _loadProviders() {
+    if (!this.hass) return;
+    try {
+      let providers = [];
+      try {
+        const wsResult = await this.hass.callWS({ type: 'ai_agent_ha/providers' });
+        const list = wsResult?.result?.providers ?? wsResult?.providers;
+        if (Array.isArray(list) && list.length > 0) providers = list;
+      } catch (_) { /* ignore */ }
+
+      if (providers.length === 0) {
+        try {
+          const raw = await this.hass.callService(
+            'ai_agent_ha',
+            'get_configured_providers',
+            {},
+            {},
+            true
+          );
+          const serviceResult = raw?.response !== undefined ? raw.response : raw;
+          const list = serviceResult?.providers;
+          if (Array.isArray(list) && list.length > 0) providers = list;
+        } catch (_) { /* ignore */ }
+      }
+
+      if (providers.length === 0) {
+        try {
+          const allEntries = await this.hass.callWS({ type: 'config_entries/get' });
+          const rawList = Array.isArray(allEntries) ? allEntries : (allEntries?.result ?? []);
+          const aiAgentEntries = rawList.filter(
+            entry => entry && entry.domain === 'ai_agent_ha'
+          );
+          if (aiAgentEntries.length > 0) {
+            providers = aiAgentEntries
+              .map(entry => {
+                const provider = this._resolveProviderFromEntry(entry);
+                if (!provider) return null;
+                return { value: provider, label: PROVIDERS[provider] || provider };
+              })
+              .filter(Boolean);
+          }
+        } catch (_) { /* ignore */ }
+      }
+
+      if (providers.length > 0) {
+        this._availableProviders = providers;
+        console.debug("Available AI providers:", this._availableProviders);
+      } else {
+        this._availableProviders = [];
+      }
+
+      if (
+        (!this._selectedProvider || !this._availableProviders.find(p => p.value === this._selectedProvider)) &&
+        this._availableProviders.length > 0
+      ) {
+        this._selectedProvider = this._availableProviders[0].value;
+      }
+    } catch (error) {
+      console.error("Error loading AI providers:", error);
+      this._error = error.message || 'Failed to load AI provider configurations.';
+      this._availableProviders = [];
+    }
+    this.providersLoaded = true;
   }
 
   _renderPromptsSection() {

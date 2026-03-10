@@ -316,6 +316,9 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
 
                 # For ollama, validate URL format
                 if provider == "ollama":
+                    from .const import normalize_url
+
+                    token_value = normalize_url(token_value)
                     token_value = token_value.strip().rstrip("/")
                     if not token_value.startswith(("http://", "https://")):
                         errors[token_field] = "invalid_url"
@@ -324,6 +327,9 @@ class AiAgentHaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ig
 
                 if not errors:
                     if provider != "ollama":
+                        from .const import normalize_url
+
+                        token_value = normalize_url(token_value)
                         self.config_data[token_field] = token_value
 
                     # For z.ai, store endpoint type
@@ -573,13 +579,13 @@ class AiAgentHaOptionsFlowHandler(config_entries.OptionsFlow):
                 token_value = user_input.get(token_field)
                 if not token_value:
                     errors[token_field] = "required"
-                elif provider == "ollama":
-                    token_value = token_value.strip().rstrip("/")
+                elif provider in ("ollama", "local"):
+                    from .const import normalize_url
+
+                    token_value = normalize_url(token_value).strip().rstrip("/")
                     if not token_value.startswith(("http://", "https://")):
                         errors[token_field] = "invalid_url"
                 if not errors:
-                    if provider == "ollama" and token_value:
-                        token_value = token_value.strip().rstrip("/")
                     # Prepare the updated configuration
                     updated_data = dict(self.config_entry.data)
                     updated_data["ai_provider"] = provider

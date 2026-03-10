@@ -49,6 +49,7 @@ from .const import (
     DEFAULT_REQUEST_TIMEOUT,
     DOMAIN,
     MAX_PROMPT_CHARS,
+    normalize_url,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1366,14 +1367,14 @@ class AiAgentHaAgent:
             self.ai_client = ZaiClient(config.get("zai_token"), model, endpoint_type)
         elif provider == "local":
             model = models_config.get("local", "")
-            url = config.get("local_url")
+            url = normalize_url(config.get("local_url"))
             if not url:
                 _LOGGER.error("Missing local_url for local provider")
                 raise Exception("Missing local_url configuration for local provider")
             self.ai_client = LocalClient(url, model)
         elif provider == "ollama":
             model = models_config.get("ollama", "llama3.2")
-            base_url = config.get("ollama_url")
+            base_url = normalize_url(config.get("ollama_url"))
             if not base_url:
                 _LOGGER.error("Missing ollama_url for Ollama provider")
                 raise Exception("Missing ollama_url configuration for Ollama provider")
@@ -4204,7 +4205,11 @@ Then restart Home Assistant to see your new dashboard in the sidebar."""
             return {"error": f"Error saving prompt history: {str(e)}"}
 
     async def load_user_prompt_history(self, user_id: str) -> Dict[str, Any]:
-        """Load user's prompt history from HA storage."""
+        """Load user's prompt history from HA storage.
+
+        Note: Store files (e.g. ai_agent_ha_history_*) persist in .storage even after
+        uninstalling the integration; use Clear in the UI to reset prompt history.
+        """
         try:
             store: Store = Store(self.hass, 1, f"ai_agent_ha_history_{user_id}")
             data = await store.async_load()

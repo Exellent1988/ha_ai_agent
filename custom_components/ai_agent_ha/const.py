@@ -45,3 +45,13 @@ MAX_PROMPT_CHARS = 60000
 
 # Supported AI providers
 DEFAULT_AI_PROVIDER = "openai"
+
+
+def normalize_url(url: str | None) -> str:
+    """Fix common URL typos (e.g. http:: -> http://)."""
+    if not url or not isinstance(url, str):
+        return url or ""
+    u = url.strip()
+    if "::/" in u:
+        u = u.replace("::/", "://", 1)
+    return u

@@ -109,6 +109,13 @@ load_chat_history:
     provider:
       description: "The AI provider."
 
+get_configured_providers:
+  name: "Get Configured Providers"
+  description: "Return the list of configured AI providers (for the frontend panel)."
+  response:
+    providers:
+      description: "List of { value, label } for each configured provider."
+
 update_dashboard:
   name: "Update Dashboard via AI Agent"
   description: "Update an existing Home Assistant dashboard using AI assistance."
